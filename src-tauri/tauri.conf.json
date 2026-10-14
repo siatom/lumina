@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lumina",
+  "productName": "Lumina",
   "version": "0.1.0",
   "identifier": "com.lumina.app",
   "build": {
@@ -10,12 +10,16 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
-        "title": "lumina",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "Lumina",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 640,
+        "minHeight": 480,
+        "resizable": true
       }
     ],
     "security": {

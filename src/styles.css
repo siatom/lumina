@@ -1,116 +1,244 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.typescript:hover {
-  filter: drop-shadow(0 0 2em #2d79c7);
-}
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  font-family: "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  color: #e8e8ea;
+  background-color: #1b1b1f;
+  color-scheme: dark;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
 }
 
-.container {
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
   margin: 0;
-  padding-top: 10vh;
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "toolbar toolbar"
+    "stage info"
+    "filmstrip filmstrip";
+  height: 100vh;
+}
+
+/* ------------------------------- toolbar -------------------------------- */
+
+.toolbar {
+  grid-area: toolbar;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #232329;
+  border-bottom: 1px solid #33333c;
+  user-select: none;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
+.toolbar button {
+  padding: 5px 10px;
+  border: 1px solid #3a3a45;
+  border-radius: 6px;
+  background: #2c2c34;
+  color: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.toolbar button:hover:not(:disabled) {
+  background: #383843;
+  border-color: #4a4a58;
 }
 
-input,
-button {
-  outline: none;
+.toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
-#greet-input {
-  margin-right: 5px;
+.divider {
+  width: 1px;
+  height: 20px;
+  background: #3a3a45;
+  margin: 0 4px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
+.spacer {
+  flex: 1;
+}
 
-  a:hover {
-    color: #24c8db;
-  }
+.zoom-label {
+  min-width: 52px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: #b9b9c4;
+}
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+.file-label {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #9a9aa6;
+  margin-right: 8px;
+}
+
+/* -------------------------------- stage --------------------------------- */
+
+.stage {
+  grid-area: stage;
+  position: relative;
+  overflow: hidden;
+  background: #131316;
+  background-image:
+    linear-gradient(45deg, #1a1a1e 25%, transparent 25%),
+    linear-gradient(-45deg, #1a1a1e 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #1a1a1e 75%),
+    linear-gradient(-45deg, transparent 75%, #1a1a1e 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  cursor: grab;
+}
+
+.stage.grabbing {
+  cursor: grabbing;
+}
+
+#viewer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  user-select: none;
+  -webkit-user-drag: none;
+  opacity: 0;
+}
+
+#viewer.visible {
+  opacity: 1;
+}
+
+.empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 24px;
+  text-align: center;
+  color: #6c6c7a;
+  pointer-events: none;
+}
+
+/* ------------------------------ info panel ------------------------------ */
+
+.info-panel {
+  grid-area: info;
+  width: 300px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: #232329;
+  border-left: 1px solid #33333c;
+}
+
+.info-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #d6d6de;
+}
+
+.info-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.info-list dt {
+  color: #8a8a98;
+  white-space: nowrap;
+}
+
+.info-list dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e2e2ea;
+}
+
+/* ------------------------------ filmstrip ------------------------------- */
+
+.filmstrip {
+  grid-area: filmstrip;
+  height: 92px;
+  background: #202026;
+  border-top: 1px solid #33333c;
+}
+
+.filmstrip-track {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 8px 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.thumb {
+  flex: 0 0 auto;
+  width: 68px;
+  height: 68px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: #2c2c34;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.thumb:hover {
+  border-color: #5a5a6a;
+}
+
+.thumb.active {
+  border-color: #4c8dff;
+}
+
+.thumb-failed {
+  opacity: 0.25;
+}
+
+/* ------------------------------- scrollbar ------------------------------ */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3d3d47;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4d4d5a;
 }

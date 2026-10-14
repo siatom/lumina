@@ -1,43 +1,44 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Lumina</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
   <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    <div id="app">
+      <header class="toolbar">
+        <button id="btn-open" title="打开图片 (Ctrl+O)">打开</button>
+        <span class="divider"></span>
+        <button id="btn-prev" title="上一张 (←)">‹ 上一张</button>
+        <button id="btn-next" title="下一张 (→)">下一张 ›</button>
+        <span class="divider"></span>
+        <button id="btn-zoom-out" title="缩小 (-)">−</button>
+        <span id="zoom-label" class="zoom-label">100%</span>
+        <button id="btn-zoom-in" title="放大 (+)">+</button>
+        <button id="btn-fit" title="适应窗口 (0)">适应</button>
+        <button id="btn-actual" title="原始大小 (1)">1:1</button>
+        <span class="spacer"></span>
+        <span id="file-label" class="file-label"></span>
+        <button id="btn-info" title="显示/隐藏信息 (i)">信息</button>
+      </header>
 
-      <div class="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/src/assets/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img
-            src="/src/assets/tauri.svg"
-            class="logo tauri"
-            alt="Tauri logo"
-          />
-        </a>
-        <a href="https://www.typescriptlang.org/docs" target="_blank">
-          <img
-            src="/src/assets/typescript.svg"
-            class="logo typescript"
-            alt="typescript logo"
-          />
-        </a>
-      </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+      <main class="stage" id="stage">
+        <img id="viewer" alt="" draggable="false" />
+        <p class="empty-hint" id="empty-hint">打开一张图片开始浏览</p>
+      </main>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
+      <aside class="info-panel" id="info-panel" hidden>
+        <h2 class="info-title">图片信息</h2>
+        <dl class="info-list" id="info-list"></dl>
+      </aside>
+
+      <footer class="filmstrip">
+        <div class="filmstrip-track" id="filmstrip"></div>
+      </footer>
+    </div>
   </body>
 </html>
