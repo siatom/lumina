@@ -56,6 +56,11 @@ kamadak-exif = "0.6"
 # Bounded in-process LRU for generated thumbnails (pure Rust, no native deps).
 lru = "0.12"
 
+# Filesystem notifications for the filmstrip. Each platform uses its native
+# API through Rust bindings (FSEvents / inotify / ReadDirectoryChangesW), so
+# there is no C toolchain to build — only the OS frameworks already present.
+notify = "8.2.0"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

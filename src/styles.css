@@ -16,6 +16,7 @@ html[data-theme="dark"] {
   --accent-soft: #4c8dff33;
   --stage-bg: #131316;
   --stage-check-a: #1a1a1e;
+  --empty-glow: #4c8dff1c;
   --stage-check-b: #131316;
   --scrollbar: #3d3d47;
   --scrollbar-hover: #4d4d5a;
@@ -34,6 +35,7 @@ html[data-theme="light"] {
   --accent: #2f6fe0;
   --accent-soft: #2f6fe026;
   --stage-bg: #e6e6ea;
+  --empty-glow: #2f6fe014;
   --stage-check-a: #dcdce2;
   --stage-check-b: #e6e6ea;
   --scrollbar: #c4c4cd;
@@ -43,6 +45,8 @@ html[data-theme="light"] {
 :root {
   font-family: "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
+  /* Slideshow crossfade length. Keep in sync with `SLIDE_MS` in main.ts. */
+  --slide-ms: 520ms;
   color-scheme: dark light;
   -webkit-font-smoothing: antialiased;
 }
@@ -71,7 +75,7 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
 }
 
 .spacer {
@@ -81,12 +85,15 @@ body {
 /* ------------------------------- toolbar -------------------------------- */
 
 .toolbar {
+  justify-content: center;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
   padding: 7px 10px;
   background: var(--bg-elev);
+  /* Anchors the "more" popover to the bar. */
+  position: relative;
   border-bottom: 1px solid var(--border);
   user-select: none;
 }
@@ -107,6 +114,62 @@ body {
   font: inherit;
   font-size: 13px;
   line-height: 1.2;
+.toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 7px;
+}
+
+.toolbar button.text-btn {
+  padding: 0 9px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar select {
+  height: 30px;
+  padding: 0 8px;
+}
+
+/* ------------------------------- icons ---------------------------------- */
+
+.icon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+/* Two-state buttons swap to the alt icon only while pressed / switched on. */
+.icon-alt {
+  display: none;
+}
+
+.toolbar button[aria-pressed="true"] > .icon-base,
+.toolbar button[data-state="on"] > .icon-base {
+  display: none;
+}
+
+.toolbar button[aria-pressed="true"] > .icon-alt,
+.toolbar button[data-state="on"] > .icon-alt {
+  display: block;
+}
+
   cursor: pointer;
 }
 
@@ -128,6 +191,13 @@ body {
 .toolbar button[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--accent-soft);
+/* The "more" trigger reads as engaged while its popover is open. */
+.toolbar button[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
   color: var(--text);
 }
 
@@ -146,6 +216,98 @@ body {
   width: 1px;
   height: 20px;
   background: var(--border-strong);
+/* ------------------------------ more menu ------------------------------- */
+
+.more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  /* Horizontal placement is set from the trigger's position in main.ts. */
+  left: 10px;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 248px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px #0007;
+}
+
+.menu-label {
+  margin: 7px 0 2px;
+  padding: 0 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.menu-label:first-child {
+  margin-top: 2px;
+}
+
+/* Full-width rows: beats the generic `.toolbar button` box model. */
+.toolbar .more-menu button {
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+}
+
+.toolbar .more-menu button:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--bg-hover);
+}
+
+.toolbar .more-menu button > span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.more-menu .icon {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.menu-kbd {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.menu-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  padding: 0 9px;
+  font-size: 13px;
+}
+
+.menu-row-label {
+  flex: 1;
+  color: var(--text);
+}
+
+.more-menu select {
+  height: 26px;
+  padding: 0 6px;
+  font-size: 12.5px;
+}
+
   margin: 0 4px;
 }
 
@@ -155,6 +317,22 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+/* Pin each region to its own column. The side panels are hidden with the
+   `hidden` attribute, which drops them from grid auto-placement — without
+   explicit columns the stage would slide into the `auto` first column and
+   collapse to zero width, hiding the image. */
+.thumbs {
+  grid-column: 1;
+}
+
+.stage {
+  grid-column: 2;
+}
+
+.info-panel {
+  grid-column: 3;
+}
+
   min-height: 0;
 }
 
@@ -253,12 +431,19 @@ button.danger:hover:not(:disabled) {
   position: relative;
   min-width: 0;
   overflow: hidden;
-  background-color: var(--stage-bg);
-  background-image:
-    linear-gradient(45deg, var(--stage-check-a) 25%, transparent 25%),
-    linear-gradient(-45deg, var(--stage-check-a) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, var(--stage-check-a) 75%),
-    linear-gradient(-45deg, transparent 75%, var(--stage-check-a) 75%);
+  /* Isolate the stage so a window resize repaints only this subtree instead of
+     invalidating the whole shell. */
+  contain: content;
+  background-color: var(--stage-check-b);
+  /* One conic gradient draws the checkerboard; the four stacked linear
+     gradients it replaces were markedly heavier to repaint on every frame of a
+     window drag or maximize animation. */
+  background-image: conic-gradient(
+    var(--stage-check-a) 25%,
+    var(--stage-check-b) 0 50%,
+    var(--stage-check-a) 0 75%,
+    var(--stage-check-b) 0
+  );
   background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   cursor: grab;
@@ -311,22 +496,137 @@ button.danger:hover:not(:disabled) {
   opacity: 0;
 }
 
+/* Playback is the only place a frame is allowed to dissolve; a manual open
+   still cuts, so navigation stays immediate. */
+.stage.slideshow #viewer {
+  transition: opacity var(--slide-ms) ease-out;
+}
+
+/* Holds the outgoing frame for the duration of the crossfade. */
+.ghost-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  transform-origin: 0 0;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.ghost-layer img {
+  display: block;
+  max-width: none;
+  transform-origin: center;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Applied only once the incoming frame is decoded, so the old image never
+   leaves a gap: it holds still, then dissolves while drifting a hair closer. */
+.ghost-layer.leaving {
+  opacity: 0;
+  transition: opacity var(--slide-ms) ease-out;
+}
+
+.ghost-layer.leaving img {
+  transform: scale(1.045);
+  transition: transform var(--slide-ms) ease-out;
+}
+
 #viewer.visible {
   opacity: 1;
 }
 
+  flex-direction: column;
 .empty-hint {
   position: absolute;
+  gap: 10px;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Ambient backdrop that stands in for the checkerboard while nothing is open:
+     a soft pool of light over the stage floor. */
+  background:
+    radial-gradient(52% 42% at 50% 44%, var(--empty-glow), transparent 70%),
+    var(--stage-check-b);
+}
+
+/* Slow, near-imperceptible rotation keeps the mark alive without stealing focus. */
+.empty-mark {
+  width: 72px;
+  height: 72px;
+  margin-bottom: 14px;
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 0.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.8;
+}
+
+/* The rotor spins, not the <svg> box: keeping the animated transform off the
+   root element means the compositor never has to re-rasterize the whole icon,
+   which is what produced the one-frame flash on startup. */
+.empty-mark-rotor {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: empty-mark-spin 60s linear infinite;
+}
+
+@keyframes empty-mark-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.empty-title {
   margin: 0;
-  padding: 24px;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  /* Compensates the trailing letter-space so the centered text stays optically
+     centered rather than sitting a hair to the left. */
+  text-indent: 0.16em;
+  color: var(--text-dim);
+}
+
+.empty-sub {
+  margin: 0;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.empty-message {
+  margin: 0;
+  max-width: 440px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* On a load failure the brand mark gives way to the message alone. */
+.empty-hint.is-message .empty-mark,
+.empty-hint.is-message .empty-title,
+.empty-hint.is-message .empty-sub {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-mark-rotor {
+    animation: none;
+  }
+  margin: 0;
+  padding: 32px;
   text-align: center;
   color: var(--text-faint);
   pointer-events: none;
 }
+  z-index: 2;
 
 .toast {
   position: absolute;
@@ -345,8 +645,9 @@ button.danger:hover:not(:disabled) {
 
 /* ------------------------------ thumbs sidebar -------------------------- */
 
+  contain: layout paint;
 .thumbs {
-  width: 208px;
+  width: 176px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -380,7 +681,7 @@ button.danger:hover:not(:disabled) {
   position: relative;
   flex: 0 0 auto;
   width: 100%;
-  height: 108px;
+  height: 88px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 6px;
@@ -428,29 +729,52 @@ button.danger:hover:not(:disabled) {
 .info-panel {
   width: 300px;
   overflow-y: auto;
-  padding: 12px 14px;
+  contain: layout paint;
   background: var(--bg-elev);
   border-left: 1px solid var(--border);
 }
 
 .info-title {
-  margin: 0 0 10px;
-  font-size: 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 12px 14px 10px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
   font-weight: 600;
-  color: var(--text);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.info-title .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
 }
 
 .info-list {
+  padding: 8px 14px 16px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 6px 12px;
+  grid-template-columns: minmax(56px, max-content) minmax(0, 1fr);
+  align-content: start;
+  gap: 0 14px;
   margin: 0;
   font-size: 12.5px;
 }
 
 .info-list dt {
-  color: var(--text-dim);
+  padding: 5px 0;
+  color: var(--text-faint);
+  padding: 5px 0;
   white-space: nowrap;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .info-list dd {
@@ -458,17 +782,30 @@ button.danger:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
+}
+
+/* Long, unbreakable values (paths, descriptions) wrap instead of truncating. */
+.info-list dd.wrap {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .info-sub {
   grid-column: 1 / -1;
-  margin: 6px 0 0;
-  padding-top: 6px;
+  margin: 14px 0 4px;
+  padding-top: 12px;
   border-top: 1px solid var(--border);
   color: var(--text-faint);
-  font-size: 11.5px;
-  letter-spacing: 0.04em;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.info-sub:first-child {
+  margin-top: 2px;
+  padding-top: 0;
+  border-top: none;
 }
 
 /* ------------------------------ status bar ------------------------------ */

@@ -6,8 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
+use tauri::{AppHandle, State};
+
 use crate::imaging::{self, DirectoryListing, ImageMetadata, TransformSpec};
 use crate::protocol;
+use crate::watcher::WatcherState;
 
 /// Metadata for a single image: dimensions, format, size and EXIF.
 ///
@@ -116,6 +119,26 @@ pub fn rename_file(path: String, new_name: String) -> Result<String, String> {
 #[tauri::command]
 pub fn delete_file(path: String) -> Result<(), String> {
     imaging::delete_file(Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// Watch `dir` for image changes, replacing any directory watched before.
+///
+/// Nothing is returned inline: changes arrive as `directory-changed` events
+/// carrying the watched directory, and the frontend answers each one by
+/// re-listing. Re-watching the current directory is a no-op.
+#[tauri::command]
+pub fn watch_directory(
+    app: AppHandle,
+    watcher: State<'_, WatcherState>,
+    dir: String,
+) -> Result<(), String> {
+    watcher.watch(&app, &dir)
+}
+
+/// Stop watching. Safe to call when nothing is watched.
+#[tauri::command]
+pub fn unwatch_directory(watcher: State<'_, WatcherState>) -> Result<(), String> {
+    watcher.unwatch()
 }
 
 /// Platform-correct base URL for the `lumina://` transport, e.g.

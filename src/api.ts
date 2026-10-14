@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 /* -------------------------------------------------------------------------- */
@@ -159,6 +160,22 @@ export function getImageMetadata(path: string): Promise<ImageMetadata> {
  */
 export function listImages(dir: string, current?: string): Promise<DirectoryListing> {
   return invoke<DirectoryListing>("list_images", { dir, current: current ?? null });
+}
+
+/**
+ * Watch `dir` for image changes, replacing any directory watched before.
+ *
+ * Nothing is reported back inline — changes arrive through
+ * {@link onDirectoryChanged}. Re-watching the directory already watched is a
+ * no-op, so this is safe to call on every open.
+ */
+export function watchDirectory(dir: string): Promise<void> {
+  return invoke<void>("watch_directory", { dir });
+}
+
+/** Stop watching the browsed directory. Safe when nothing is watched. */
+export function unwatchDirectory(): Promise<void> {
+  return invoke<void>("unwatch_directory");
 }
 
 /**
@@ -374,6 +391,25 @@ export async function pickSavePathFor(
  */
 export async function confirmAction(message: string, title = "Lumina"): Promise<boolean> {
   return confirm(message, { title, kind: "warning" });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Filesystem watch                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Subscribe to image changes in the watched directory.
+ *
+ * The payload only names the directory — re-list it and apply the result
+ * wholesale rather than patching entries in place, so a missed event can never
+ * leave a phantom entry on screen. Resolves to an unsubscribe function.
+ */
+export async function onDirectoryChanged(
+  handler: (dir: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ dir: string }>("directory-changed", (event) => {
+    handler(event.payload.dir);
+  });
 }
 
 /* -------------------------------------------------------------------------- */

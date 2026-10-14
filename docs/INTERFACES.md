@@ -32,6 +32,8 @@
 - **`commands.rs` 只做参数适配**，业务逻辑一律下沉到 `imaging.rs`。
 - 前端所有 IPC 调用必须经过 `src/api.ts`，不要在组件里直接 `invoke`。
 
+除「请求 / 响应」外还有一条**反向通道**：后端 `watcher.rs` 监听当前浏览目录，文件增删改时 emit `directory-changed` 事件，前端 `listen` 后重新列举目录（见 §4.12）。
+
 ---
 
 ## 2. 图片数据传输方案取舍（重点：大图性能）
@@ -305,6 +307,38 @@ function deleteFile(path: string): Promise<void>;
 function getProtocolBase(): Promise<string>; // "http://lumina.localhost" 或 "lumina://localhost"
 ```
 
+### 4.12 `watch_directory` / `unwatch_directory`（目录监听）
+
+让缩略图侧栏跟着磁盘走：目录里的图片被外部增删改时，前端无需用户操作即可刷新。
+
+```ts
+function watchDirectory(dir: string): Promise<void>;   // 监听（替换上一个）
+function unwatchDirectory(): Promise<void>;            // 停止监听
+
+/** 订阅目录变化；返回取消订阅函数。 */
+function onDirectoryChanged(handler: (dir: string) => void): Promise<UnlistenFn>;
+```
+
+**契约要点**
+
+- **只监听一个目录**，非递归。前端在每次打开文件后调用 `watch_directory`；**重复监听当前目录是 no-op**，因此可以放心地每次都调。
+- **事件只报「哪个目录变了」，不报「什么变了」**：payload 为 `{ dir: string }`。前端收到后**重新列举目录并整体替换**，不做增量合并——这样漏事件、乱序事件都不会在界面上留下幽灵条目。
+- **事件已防抖**：280ms 静默窗口内的连续变化合并为一次通知（批量导出几十张图只刷新一次）。无关流量（非图片文件、`.DS_Store`）不会延长静默窗口，因此同目录里持续追加的日志文件不会把刷新无限推迟。
+- **过滤规则**：只认「创建 / 删除 / 写入 / 重命名」，且路径带受支持图片扩展名（大小写不敏感）或**就是被监听的目录本身**（目录被改名 / 删除时也要通知前端）。`Access`（读取）事件一律忽略，否则会自激。
+- 监听通过各平台原生 API 实现（macOS FSEvents / Linux inotify / Windows `ReadDirectoryChangesW`），无 C 工具链依赖。
+
+**前端行为约定**（`src/main.ts`）
+
+| 磁盘上的变化 | 界面反应 |
+| --- | --- |
+| 新增图片 | 缩略图侧栏出现新条目，计数更新 |
+| 删除图片（非当前） | 对应条目消失，导航索引重算 |
+| 删除**正在浏览**的图片 | 自动接替原位置的下一张（末尾则退到上一张）并 toast 提示；全部删空则回到空状态 |
+| 修改**正在浏览**的图片 | 按新的 `modified_ms` / `file_size` 重新解码显示 |
+| 浏览中的目录被改名 / 删除 | 回到空状态并提示，同时停止监听 |
+
+> 修改检测依赖 `modified_ms` 与 `file_size` 两个字段（见 §4.1），后端 `ImageEntry` 必须持续提供它们。
+
 ---
 
 ## 5. 文件对话框
@@ -420,6 +454,8 @@ cd src-tauri && cargo test --lib -- --nocapture    # 打印「格式 × 结果�
 7. 多页/调色板 TIFF 见第 6 节 C（像素解码不支持 palette/bilevel）。
 8. `transform_image` 每次都是「整图解码 → 编辑 → 编码」，大图会一次性占用较多内存；尚未做流式/分块处理。
 9. 尚未验证的运行时项：`lumina://` 在 Windows WebView2 下的实际加载、`dialog` 权限在生产构建下的行为（阶段 1 已通过编译/单测/前端构建，GUI 冒烟见 README）。
+10. 目录监听（§4.12）**非递归**：只看当前浏览目录，子目录里的变化不会触发刷新。事件已防抖，但极端高频写入（如边下载边写入大图）仍可能在写入完成前就触发一次刷新，此时读到的是中间态。
+11. 目录监听依赖平台原生 API，**网络盘 / 某些虚拟文件系统**可能不上报事件；此时界面退回「手动重新打开目录」的行为。
 
 ---
 

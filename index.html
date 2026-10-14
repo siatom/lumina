@@ -3,75 +3,275 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      /* Mirrors the window's background_color: whatever the webview paints
+         before the stylesheet lands must already be the dark shell, never the
+         default white. */
+      html {
+        background-color: #1b1b1f;
+      }
+    </style>
+    <script>
+      // Apply the saved theme before the first paint. main.ts also applies it,
+      // but by then the shell has already painted the default dark palette, so
+      // switching to light repainted the whole window once — the startup flash.
+      try {
+        if (localStorage.getItem("lumina-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.style.backgroundColor = "#f4f4f6";
+        }
+      } catch {
+        /* storage unavailable — keep the default theme */
+      }
+    </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <title>Lumina</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
   <body>
+    <!-- Icon sprite — Lucide-style 24×24 stroke icons, drawn with currentColor -->
+    <svg class="icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-image" viewBox="0 0 24 24">
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </symbol>
+      <symbol id="i-folder-open" viewBox="0 0 24 24">
+        <path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2" />
+      </symbol>
+      <symbol id="i-chevron-left" viewBox="0 0 24 24">
+        <path d="m15 18-6-6 6-6" />
+      </symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24">
+        <path d="m9 18 6-6-6-6" />
+      </symbol>
+      <symbol id="i-zoom-in" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" x2="16.65" y1="21" y2="16.65" />
+        <line x1="11" x2="11" y1="8" y2="14" />
+        <line x1="8" x2="14" y1="11" y2="11" />
+      </symbol>
+      <symbol id="i-zoom-out" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" x2="16.65" y1="21" y2="16.65" />
+        <line x1="8" x2="14" y1="11" y2="11" />
+      </symbol>
+      <symbol id="i-scan" viewBox="0 0 24 24">
+        <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+        <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+        <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+        <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+      </symbol>
+      <symbol id="i-rotate-ccw" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+        <path d="M3 3v5h5" />
+      </symbol>
+      <symbol id="i-rotate-cw" viewBox="0 0 24 24">
+        <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+        <path d="M21 3v5h-5" />
+      </symbol>
+      <symbol id="i-flip-h" viewBox="0 0 24 24">
+        <path d="M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3" />
+        <path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3" />
+        <path d="M12 20v2" />
+        <path d="M12 14v2" />
+        <path d="M12 8v2" />
+        <path d="M12 2v2" />
+      </symbol>
+      <symbol id="i-flip-v" viewBox="0 0 24 24">
+        <path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3" />
+        <path d="M21 16v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
+        <path d="M4 12H2" />
+        <path d="M10 12H8" />
+        <path d="M16 12h-2" />
+        <path d="M22 12h-2" />
+      </symbol>
+      <symbol id="i-undo" viewBox="0 0 24 24">
+        <path d="M9 14 4 9l5-5" />
+        <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11" />
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24">
+        <polygon points="5 3 19 12 5 21 5 3" />
+      </symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24">
+        <rect x="6" y="4" width="4" height="16" rx="1" />
+        <rect x="14" y="4" width="4" height="16" rx="1" />
+      </symbol>
+      <symbol id="i-save" viewBox="0 0 24 24">
+        <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+        <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+        <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+      </symbol>
+      <symbol id="i-save-all" viewBox="0 0 24 24">
+        <path d="M10 2v3a1 1 0 0 0 1 1h5" />
+        <path d="M18 18v-6a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6" />
+        <path d="M18 22H4a2 2 0 0 1-2-2V6" />
+        <path d="M8 18a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9.414a1 1 0 0 0-.293-.707l-3.414-3.414A1 1 0 0 0 16.586 5H9a1 1 0 0 0-1 1z" />
+      </symbol>
+      <symbol id="i-crop" viewBox="0 0 24 24">
+        <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+        <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+      </symbol>
+      <symbol id="i-pencil" viewBox="0 0 24 24">
+        <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+        <path d="m15 5 4 4" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M3 6h18" />
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        <line x1="10" x2="10" y1="11" y2="17" />
+        <line x1="14" x2="14" y1="11" y2="17" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+      </symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24">
+        <rect width="7" height="7" x="3" y="3" rx="1" />
+        <rect width="7" height="7" x="14" y="3" rx="1" />
+        <rect width="7" height="7" x="14" y="14" rx="1" />
+        <rect width="7" height="7" x="3" y="14" rx="1" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 16v-4" />
+        <path d="M12 8h.01" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
+        <path d="m4.93 4.93 1.41 1.41" />
+        <path d="m17.66 17.66 1.41 1.41" />
+        <path d="M2 12h2" />
+        <path d="M20 12h2" />
+        <path d="m6.34 17.66-1.41 1.41" />
+        <path d="m19.07 4.93-1.41 1.41" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+      <symbol id="i-maximize" viewBox="0 0 24 24">
+        <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+        <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+        <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+        <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+      </symbol>
+      <symbol id="i-minimize" viewBox="0 0 24 24">
+        <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+        <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+        <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+        <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+      </symbol>
+      <symbol id="i-more" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="1" />
+        <circle cx="19" cy="12" r="1" />
+        <circle cx="5" cy="12" r="1" />
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24">
+        <line x1="21" x2="14" y1="4" y2="4" />
+        <line x1="10" x2="3" y1="4" y2="4" />
+        <line x1="21" x2="12" y1="12" y2="12" />
+        <line x1="8" x2="3" y1="12" y2="12" />
+        <line x1="21" x2="16" y1="20" y2="20" />
+        <line x1="12" x2="3" y1="20" y2="20" />
+        <line x1="14" x2="14" y1="2" y2="6" />
+        <line x1="8" x2="8" y1="10" y2="14" />
+        <line x1="16" x2="16" y1="18" y2="22" />
+      </symbol>
+      <symbol id="i-timer" viewBox="0 0 24 24">
+        <line x1="10" x2="14" y1="2" y2="2" />
+        <line x1="12" x2="15" y1="14" y2="11" />
+        <circle cx="12" cy="14" r="8" />
+      </symbol>
+    </svg>
+
     <div id="app">
       <header class="toolbar" id="toolbar">
         <div class="tool-group">
-          <button id="btn-open" title="打开图片 (Ctrl+O)">打开图片</button>
-          <button id="btn-open-folder" title="打开文件夹，浏览其中所有图片">打开文件夹</button>
+          <button id="btn-open" title="打开图片 (Ctrl+O)" aria-label="打开图片">
+            <svg class="icon"><use href="#i-image" /></svg>
+          </button>
+          <button id="btn-open-folder" title="打开文件夹，浏览其中所有图片" aria-label="打开文件夹">
+            <svg class="icon"><use href="#i-folder-open" /></svg>
+          </button>
         </div>
 
         <span class="divider"></span>
 
         <div class="tool-group">
-          <button id="btn-prev" title="上一张 (↑ / ← / PageUp)" disabled>上一张</button>
-          <button id="btn-next" title="下一张 (↓ / → / PageDown)" disabled>下一张</button>
+          <button id="btn-prev" title="上一张 (↑ / ← / PageUp)" aria-label="上一张" disabled>
+            <svg class="icon"><use href="#i-chevron-left" /></svg>
+          </button>
+          <button id="btn-next" title="下一张 (↓ / → / PageDown)" aria-label="下一张" disabled>
+            <svg class="icon"><use href="#i-chevron-right" /></svg>
+          </button>
         </div>
 
         <span class="divider"></span>
 
         <div class="tool-group">
-          <button id="btn-zoom-out" title="缩小 (-)">−</button>
+          <button
+            id="btn-slideshow"
+            title="播放 / 暂停幻灯片 (空格)"
+            aria-label="播放 / 暂停幻灯片"
+            aria-pressed="false"
+            disabled
+          >
+            <svg class="icon icon-base"><use href="#i-play" /></svg>
+            <svg class="icon icon-alt"><use href="#i-pause" /></svg>
+          </button>
+        </div>
+
+        <span class="divider"></span>
+
+        <div class="tool-group">
+          <button id="btn-zoom-out" title="缩小 (-)" aria-label="缩小" disabled>
+            <svg class="icon"><use href="#i-zoom-out" /></svg>
+          </button>
           <button id="zoom-label" class="zoom-label" title="点击恢复适应窗口 (F)" disabled>100%</button>
-          <button id="btn-zoom-in" title="放大 (+)">+</button>
-          <button id="btn-fit" title="适应窗口 (F)">适应</button>
-          <button id="btn-actual" title="原始大小 1:1 (1)">1:1</button>
+          <button id="btn-zoom-in" title="放大 (+)" aria-label="放大" disabled>
+            <svg class="icon"><use href="#i-zoom-in" /></svg>
+          </button>
+          <button id="btn-fit" title="适应窗口 (F)" aria-label="适应窗口" disabled>
+            <svg class="icon"><use href="#i-scan" /></svg>
+          </button>
+          <button id="btn-actual" class="text-btn" title="原始大小 1:1 (1)" disabled>1:1</button>
         </div>
 
         <span class="divider"></span>
 
         <div class="tool-group">
-          <button id="btn-rotate-left" title="向左旋转 90°（仅预览）(L / Shift+R)">↺</button>
-          <button id="btn-rotate-right" title="向右旋转 90°（仅预览）(R)">↻</button>
-          <button id="btn-flip-h" title="水平翻转（仅预览）(H)">⇋</button>
-          <button id="btn-flip-v" title="垂直翻转（仅预览）(V)">⇅</button>
-          <button id="btn-reset-transform" title="重置旋转/翻转 (Shift+0)">重置</button>
+          <button id="btn-rotate-left" title="向左旋转 90°（仅预览）(L / Shift+R)" aria-label="向左旋转" disabled>
+            <svg class="icon"><use href="#i-rotate-ccw" /></svg>
+          </button>
+          <button id="btn-rotate-right" title="向右旋转 90°（仅预览）(R)" aria-label="向右旋转" disabled>
+            <svg class="icon"><use href="#i-rotate-cw" /></svg>
+          </button>
+          <button id="btn-flip-h" title="水平翻转（仅预览）(H)" aria-label="水平翻转" disabled>
+            <svg class="icon"><use href="#i-flip-h" /></svg>
+          </button>
+          <button id="btn-flip-v" title="垂直翻转（仅预览）(V)" aria-label="垂直翻转" disabled>
+            <svg class="icon"><use href="#i-flip-v" /></svg>
+          </button>
+          <button id="btn-reset-transform" title="重置旋转/翻转 (Shift+0)" aria-label="重置旋转/翻转" disabled>
+            <svg class="icon"><use href="#i-undo" /></svg>
+          </button>
         </div>
 
         <span class="divider"></span>
 
         <div class="tool-group">
-          <button id="btn-slideshow" title="播放 / 暂停幻灯片 (空格)">▶ 幻灯片</button>
-          <label class="field" title="幻灯片切换间隔">
-            <select id="slideshow-interval">
-              <option value="2">2 秒</option>
-              <option value="3" selected>3 秒</option>
-              <option value="5">5 秒</option>
-              <option value="10">10 秒</option>
-            </select>
-          </label>
-        </div>
-
-        <span class="divider"></span>
-
-        <div class="tool-group">
-          <button id="btn-save-as" title="另存为 / 转换格式 (Ctrl+S)" disabled>另存为</button>
-          <label class="field" title="JPEG 质量（1-100，仅 JPEG 生效）">
-            <select id="quality-select">
-              <option value="60">质量 60</option>
-              <option value="75">质量 75</option>
-              <option value="85" selected>质量 85</option>
-              <option value="92">质量 92</option>
-              <option value="100">质量 100</option>
-            </select>
-          </label>
-          <button id="btn-save-transform" title="把当前旋转/翻转写入新文件（不覆盖原图）" disabled>
-            保存旋转结果
+          <button
+            id="btn-crop"
+            title="进入 / 退出裁剪模式 (C)"
+            aria-label="裁剪"
+            aria-pressed="false"
+            disabled
+          >
+            <svg class="icon"><use href="#i-crop" /></svg>
           </button>
           <button id="btn-crop" title="进入 / 退出裁剪模式 (C)" disabled>裁剪</button>
         </div>
@@ -79,20 +279,86 @@
         <span class="divider"></span>
 
         <div class="tool-group">
-          <button id="btn-rename" title="重命名当前文件" disabled>重命名</button>
-          <button id="btn-delete" class="danger" title="删除当前文件（需确认，不可撤销）" disabled>
-            删除
+          <button
+            id="btn-more"
+            title="更多操作"
+            aria-label="更多操作"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="more-menu"
+          >
+            <svg class="icon"><use href="#i-more" /></svg>
+          </button>
+          <button id="btn-thumbs" title="显示 / 隐藏缩略图侧栏 (T)" aria-label="缩略图" aria-pressed="true">
+            <svg class="icon"><use href="#i-grid" /></svg>
+          </button>
+          <button id="btn-info" title="显示 / 隐藏信息面板 (I)" aria-label="信息面板" aria-pressed="false">
+            <svg class="icon"><use href="#i-info" /></svg>
+          </button>
+          <button id="btn-theme" title="切换深色 / 浅色主题" aria-label="切换主题" data-state="off">
+            <svg class="icon icon-base"><use href="#i-moon" /></svg>
+            <svg class="icon icon-alt"><use href="#i-sun" /></svg>
+          </button>
+          <button id="btn-fullscreen" title="全屏 (F11)" aria-label="全屏" data-state="off">
+            <svg class="icon icon-base"><use href="#i-maximize" /></svg>
+            <svg class="icon icon-alt"><use href="#i-minimize" /></svg>
           </button>
           <button id="btn-copy-path" title="复制当前文件的完整路径" disabled>复制路径</button>
         </div>
 
-        <span class="spacer"></span>
+        <!-- Overflow popover for low-frequency file actions. Lives inside the
+             toolbar so the shared `[aria-pressed]` icon-swap rules still apply. -->
+        <div class="more-menu" id="more-menu" aria-label="更多操作" hidden>
+          <p class="menu-label">输出</p>
+          <button id="btn-save-as" disabled>
+            <svg class="icon"><use href="#i-save" /></svg>
+            <span>另存为 / 转换格式</span>
+            <kbd class="menu-kbd">Ctrl+S</kbd>
+          </button>
+          <div class="menu-row">
+            <svg class="icon"><use href="#i-sliders" /></svg>
+            <span class="menu-row-label">JPEG 质量</span>
+            <select id="quality-select" title="JPEG 质量（1-100，仅 JPEG 生效）">
+              <option value="60">60</option>
+              <option value="75">75</option>
+              <option value="85" selected>85</option>
+              <option value="92">92</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+          <button id="btn-save-transform" disabled>
+            <svg class="icon"><use href="#i-save-all" /></svg>
+            <span>保存旋转结果</span>
+          </button>
 
-        <div class="tool-group">
-          <button id="btn-thumbs" title="显示 / 隐藏缩略图侧栏 (T)" aria-pressed="true">缩略图</button>
-          <button id="btn-info" title="显示 / 隐藏信息面板 (I)" aria-pressed="false">信息</button>
-          <button id="btn-theme" title="切换深色 / 浅色主题">主题</button>
-          <button id="btn-fullscreen" title="全屏 (F11)">全屏</button>
+          <p class="menu-label">幻灯片</p>
+          <div class="menu-row">
+            <svg class="icon"><use href="#i-timer" /></svg>
+            <span class="menu-row-label">切换间隔</span>
+            <select id="slideshow-interval" title="幻灯片切换间隔">
+              <option value="2">2 秒</option>
+              <option value="3" selected>3 秒</option>
+              <option value="5">5 秒</option>
+              <option value="10">10 秒</option>
+            </select>
+          </div>
+
+          <p class="menu-label">文件</p>
+          <button id="btn-rename" disabled>
+            <svg class="icon"><use href="#i-pencil" /></svg>
+            <span>重命名</span>
+            <kbd class="menu-kbd">F2</kbd>
+          </button>
+          <button id="btn-copy-path" disabled>
+            <svg class="icon"><use href="#i-copy" /></svg>
+            <span>复制路径</span>
+            <kbd class="menu-kbd">Ctrl+Shift+C</kbd>
+          </button>
+          <button id="btn-delete" class="danger" disabled>
+            <svg class="icon"><use href="#i-trash" /></svg>
+            <span>删除</span>
+            <kbd class="menu-kbd">Del</kbd>
+          </button>
         </div>
       </header>
 
@@ -130,14 +396,43 @@
 
         <main class="stage" id="stage">
           <img id="viewer" alt="" draggable="false" />
+          <!-- Outgoing frame during a slideshow crossfade. Mirrors #viewer's
+               transform so the swap underneath is never visible. -->
+          <div class="ghost-layer" id="ghost-layer" hidden>
+            <img id="viewer-ghost" alt="" aria-hidden="true" draggable="false" />
+          </div>
           <div class="crop-overlay" id="crop-overlay" hidden></div>
-          <p class="empty-hint" id="empty-hint">打开一张图片开始浏览</p>
+          <div class="empty-hint" id="empty-hint">
+            <svg
+              class="empty-mark"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <g class="empty-mark-rotor">
+                <circle cx="12" cy="12" r="10" />
+                <path d="m14.31 8 5.74 9.94" />
+                <path d="M9.69 8h11.48" />
+                <path d="m7.38 12 5.74-9.94" />
+                <path d="M9.69 16 3.95 6.06" />
+                <path d="M14.31 16H2.83" />
+                <path d="m16.62 12-5.74 9.94" />
+              </g>
+            </svg>
+            <p class="empty-title">让光停在此刻</p>
+            <p class="empty-sub">拖入图片，或按 Ctrl+O 打开</p>
+            <p class="empty-message" id="empty-message" hidden></p>
+          </div>
           <div class="drop-hint" id="drop-hint" hidden>松开以打开</div>
           <div class="toast" id="toast" hidden></div>
         </main>
 
         <aside class="info-panel" id="info-panel" hidden>
-          <h2 class="info-title">图片信息</h2>
+          <h2 class="info-title">
+            <svg class="icon"><use href="#i-info" /></svg>
+            图片信息
+          </h2>
           <dl class="info-list" id="info-list"></dl>
         </aside>
       </div>

@@ -35,6 +35,7 @@ import {
   listImages,
   luminaImageUrl,
   onFileDrop,
+  onDirectoryChanged,
   pickFolder,
   pickImage,
   pickSavePathFor,
@@ -45,6 +46,8 @@ import {
   type CropRect,
   type DirectoryListing,
   type ImageEntry,
+  unwatchDirectory,
+  watchDirectory,
   type ImageMetadata,
 } from "./api";
 
@@ -102,7 +105,10 @@ const cropX = el<HTMLInputElement>("crop-x");
 const cropY = el<HTMLInputElement>("crop-y");
 const cropW = el<HTMLInputElement>("crop-w");
 const cropH = el<HTMLInputElement>("crop-h");
+const ghostLayer = el<HTMLElement>("ghost-layer");
+const ghostImg = el<HTMLImageElement>("viewer-ghost");
 
+const emptyMessage = el<HTMLElement>("empty-message");
 const renameModal = el<HTMLElement>("rename-modal");
 const renameInput = el<HTMLInputElement>("rename-input");
 const renameSub = el<HTMLElement>("rename-sub");
@@ -173,6 +179,9 @@ let viewerFellBack = false;
 let viewerBlobUrl: string | null = null;
 
 /** Panel visibility, tracked explicitly (the DOM `hidden` prop is tri-state). */
+const btnMore = el<HTMLButtonElement>("btn-more");
+const moreMenu = el<HTMLElement>("more-menu");
+const toolbar = el<HTMLElement>("toolbar");
 let thumbsVisible = true;
 let infoVisible = false;
 
@@ -214,6 +223,17 @@ function clampScale(value: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
 }
 
+/** True while playback is what tucked the filmstrip away, so stopping restores it. */
+let thumbsHiddenBySlideshow = false;
+
+/** Crossfade length; mirrors `--slide-ms` in styles.css. */
+const SLIDE_MS = 520;
+/** Set by the slideshow tick so the next open crossfades instead of cutting. */
+let slideAdvance = false;
+/** True when the slideshow itself went fullscreen, so stopping can hand it back. */
+let fullscreenEnteredBySlideshow = false;
+let ghostTimer: number | null = null;
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 /**
  * Dimensions as the viewer actually renders them.
  *
@@ -270,8 +290,13 @@ function applyTransform(): void {
       `translate(${ox}px, ${oy}px) rotate(${rotation}deg) scale(${scale * fh}, ${scale * fv})`;
   }
   const label = `${Math.round(scale * 100)}%`;
-  zoomLabel.textContent = label;
-  statusZoom.textContent = label;
+  // Skip identical writes: applyTransform() runs on every frame while the
+  // window is being resized, and redundant text updates force needless work.
+  if (label !== lastZoomLabel) {
+    lastZoomLabel = label;
+    zoomLabel.textContent = label;
+    statusZoom.textContent = label;
+  }
 }
 
 /**
@@ -304,6 +329,8 @@ function stageToImage(sx: number, sy: number): { x: number; y: number } {
     y: (dx * sin + dy * cos) / (scale * (flipV ? -1 : 1)),
   };
 }
+
+let lastZoomLabel = "";
 
 /** Scale that fits the whole (rotated) image inside the stage, never upscaling. */
 function fitScale(): number {
@@ -432,7 +459,10 @@ function showToast(text: string): void {
 }
 
 function showPlaceholder(text: string): void {
-  emptyHint.textContent = text;
+  // Swap the branded empty state for the failure message.
+  emptyHint.classList.add("is-message");
+  emptyMessage.textContent = text;
+  emptyMessage.hidden = false;
   emptyHint.hidden = false;
   viewer.classList.remove("visible");
 }
@@ -515,7 +545,7 @@ function updateControlsEnabled(): void {
 /* Info panel                                                                  */
 /* -------------------------------------------------------------------------- */
 
-function addInfoRow(label: string, value: string | null | undefined): void {
+function addInfoRow(label: string, value: string | null | undefined, wrap = false): void {
   if (value === null || value === undefined || value === "") return;
   const dt = document.createElement("dt");
   dt.textContent = label;
@@ -547,14 +577,14 @@ function renderInfo(m: ImageMetadata): void {
   addInfoRow("格式", m.format.toUpperCase());
   addInfoRow("尺寸", `${m.width} × ${m.height}`);
   addInfoRow("文件大小", formatBytes(m.file_size));
-  addInfoRow("路径", m.path);
+  addInfoRow("路径", m.path, true);
 
   const e = m.exif;
   if (!e) return;
 
   addInfoSub("EXIF");
-  addInfoRow("相机", [e.make, e.model].filter(Boolean).join(" ") || null);
-  addInfoRow("镜头", e.lens_model);
+  addInfoRow("相机", [e.make, e.model].filter(Boolean).join(" ") || null, true);
+  addInfoRow("镜头", e.lens_model, true);
   addInfoRow("拍摄时间", e.datetime);
   addInfoRow("曝光时间", e.exposure_time);
   addInfoRow("光圈", e.f_number);
@@ -562,10 +592,11 @@ function renderInfo(m: ImageMetadata): void {
   addInfoRow("焦距", e.focal_length);
   addInfoRow("方向", e.orientation != null ? String(e.orientation) : null);
   addInfoRow("作者", e.artist);
-  addInfoRow("版权", e.copyright);
-  addInfoRow("描述", e.description);
+  addInfoRow("版权", e.copyright, true);
+  addInfoRow("描述", e.description, true);
   addInfoRow("软件", e.software);
 
+  if (wrap) dd.classList.add("wrap");
   const hasGps =
     e.gps_latitude !== null || e.gps_longitude !== null || e.gps_altitude !== null;
   if (hasGps) {
@@ -587,6 +618,7 @@ function renderInfo(m: ImageMetadata): void {
 const THUMB_CONCURRENCY = 6;
 
 /** Tiles waiting for a free slot in the loading pool. */
+  addInfoSub("文件");
 const thumbQueue: HTMLImageElement[] = [];
 let thumbsInFlight = 0;
 
@@ -775,7 +807,11 @@ async function openPath(path: string): Promise<void> {
   setCropMode(false);
 
   emptyHint.hidden = true;
-  viewer.classList.add("visible");
+  emptyHint.classList.remove("is-message");
+  emptyMessage.hidden = true;
+  // While animating, the ghost covers the stage: the viewer stays dark until
+  // the incoming frame has decoded, then crossfades in.
+  if (!animate || !parkViewerInGhost()) viewer.classList.add("visible");
   renderInfo(oriented);
   updateStatus();
   updateControlsEnabled();
@@ -788,6 +824,56 @@ async function openPath(path: string): Promise<void> {
   });
   if (token !== openToken) return;
   viewer.src = url;
+/* -------------------------------------------------------------------------- */
+/* Slideshow transition                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Freeze the frame currently on screen into the ghost layer.
+ *
+ * The ghost is a *snapshot*, not a second viewer: it copies the outgoing image
+ * URL and the live transform verbatim, so it lands pixel-for-pixel over
+ * `#viewer` and the incoming frame can be swapped underneath it unseen.
+ * Returns false when there is nothing worth snapshotting.
+ */
+function parkViewerInGhost(): boolean {
+  if (!viewer.src || viewer.naturalWidth === 0) return false;
+  ghostImg.src = viewer.src;
+  ghostImg.style.width = `${viewer.naturalWidth}px`;
+  ghostImg.style.height = `${viewer.naturalHeight}px`;
+  ghostLayer.style.transform = viewer.style.transform;
+  ghostLayer.classList.remove("leaving");
+  ghostLayer.hidden = false;
+  viewer.classList.remove("visible");
+  // Safety net: a frame that never decodes must not strand the ghost.
+  if (ghostTimer !== null) window.clearTimeout(ghostTimer);
+  ghostTimer = window.setTimeout(releaseGhost, 2500);
+  return true;
+}
+
+/** Fade the incoming frame in and let the parked frame drift out. */
+function releaseGhost(): void {
+  viewer.classList.add("visible");
+  if (ghostLayer.hidden) return;
+  if (ghostTimer !== null) window.clearTimeout(ghostTimer);
+  ghostLayer.classList.add("leaving");
+  ghostTimer = window.setTimeout(clearGhost, SLIDE_MS + 80);
+}
+
+/** Drop the ghost layer and reset it for the next transition. */
+function clearGhost(): void {
+  if (ghostTimer !== null) {
+    window.clearTimeout(ghostTimer);
+    ghostTimer = null;
+  }
+  ghostLayer.hidden = true;
+  ghostLayer.classList.remove("leaving");
+  ghostLayer.style.transform = "";
+  ghostImg.removeAttribute("src");
+  ghostImg.style.width = "";
+  ghostImg.style.height = "";
+}
+
 
   // Safety net: the decoded bitmap is authoritative. If the engine's orientation
   // differs from what the EXIF tag predicted (missing tag, unusual container),
@@ -795,10 +881,22 @@ async function openPath(path: string): Promise<void> {
   viewer.addEventListener(
     "load",
     () => {
-      if (token === openToken) reconcileViewerDims();
+      if (token !== openToken) return;
+      reconcileViewerDims();
+      if (animate) releaseGhost();
     },
     { once: true },
   );
+
+  // Decide the transition style before `currentPath` is reassigned below: a
+  // slideshow advance crossfades, every other open cuts.
+  const animate =
+    slideAdvance &&
+    !reduceMotion.matches &&
+    currentPath !== null &&
+    currentPath !== m.path &&
+    viewer.classList.contains("visible");
+  slideAdvance = false;
 
   // Fit uses the metadata dimensions, so it does not wait for `load`.
   zoomToFit();
@@ -888,6 +986,9 @@ async function preloadImage(entry: ImageEntry): Promise<void> {
   } catch {
     preloadCache.delete(key);
   }
+  // Keep the filmstrip in step with the folder from here on.
+  if (listing) ensureWatching(listing.dir);
+
 }
 
 async function openDirectory(dir: string): Promise<void> {
@@ -954,6 +1055,92 @@ function joinPath(dir: string, name: string): string {
 function encodableExt(m: ImageMetadata): string {
   const ext = m.format.toLowerCase();
   return ENCODABLE.includes(ext) ? ext : "png";
+/* -------------------------------------------------------------------------- */
+/* Filesystem watch                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** Directory the backend is watching, so we only re-arm it when it changes. */
+let watchedDir: string | null = null;
+
+function ensureWatching(dir: string): void {
+  if (watchedDir === dir) return;
+  watchedDir = dir;
+  watchDirectory(dir).catch(() => {
+    // Not fatal — the filmstrip simply stops tracking the folder.
+    watchedDir = null;
+  });
+}
+
+/**
+ * Re-list the browsed directory and bring the UI back in line with the disk.
+ *
+ * Nothing is applied incrementally: the listing is replaced wholesale, so a
+ * coalesced — or even dropped — event can never leave a stale entry on screen.
+ */
+async function refreshListing(): Promise<void> {
+  const dir = listing?.dir;
+  if (dir === undefined) return;
+
+  let fresh: DirectoryListing;
+  try {
+    fresh = await listImages(dir, currentPath ?? undefined);
+  } catch {
+    // The folder itself is gone — nothing left to browse or watch.
+    watchedDir = null;
+    void unwatchDirectory();
+    listing = null;
+    resetViewerState(`无法读取文件夹：${dir}`);
+    return;
+  }
+  // A newer open won the race — drop this result.
+  if (listing === null || listing.dir !== dir) return;
+
+  const previous = listing;
+  const open = currentPath;
+  const entry = open !== null ? fresh.entries.find((e) => e.path === open) : undefined;
+  listing = fresh;
+  thumbsRendered = false;
+
+  // Rewritten in place: re-decode under a fresh version token.
+  if (
+    open !== null &&
+    entry !== undefined &&
+    meta !== null &&
+    (entry.modified_ms !== meta.modified_ms || entry.file_size !== meta.file_size)
+  ) {
+    await openPath(entry.path);
+    return;
+  }
+
+  // The open file vanished, or nothing is open yet: adopt the nearest entry.
+  if (entry === undefined) {
+    const wasAt = open !== null ? previous.entries.findIndex((e) => e.path === open) : 0;
+    const next = fresh.entries[Math.min(Math.max(wasAt, 0), fresh.entries.length - 1)];
+    if (next !== undefined) {
+      if (open !== null) showToast(`“${baseName(open)}” 已被删除`);
+      await openPath(next.path);
+      return;
+    }
+    if (open !== null) resetViewerState("目录内的图片已全部移除");
+    else {
+      clearThumbs();
+      updateNavigation();
+      updateStatus();
+    }
+    return;
+  }
+
+  renderThumbs(fresh, entry.path);
+  updateNavigation();
+  updateStatus();
+}
+
+/** Answer a watch event, ignoring folders we have since navigated away from. */
+function handleDirectoryChanged(dir: string): void {
+  if (listing === null || listing.dir !== dir) return;
+  void refreshListing();
+}
+
 }
 
 /** Default "save as" target: sibling of the source, same format, suffixed. */
@@ -1294,7 +1481,7 @@ async function submitRename(): Promise<void> {
 
 /** Clear every per-file bit of state and show the placeholder again. */
 function resetViewerState(message: string): void {
-  stopSlideshow();
+  void stopSlideshow();
   releaseViewerBlob();
   meta = null;
   currentPath = null;
@@ -1325,7 +1512,7 @@ async function removeCurrent(): Promise<void> {
   );
   if (!ok) return;
 
-  stopSlideshow();
+  void stopSlideshow();
   try {
     await deleteFile(path);
   } catch (err) {
@@ -1408,11 +1595,11 @@ let slideshowTimer: number | null = null;
 
 function updateSlideshowButton(): void {
   const playing = slideshowTimer !== null;
-  btnSlideshow.textContent = playing ? "⏸ 暂停" : "▶ 幻灯片";
+  // Icon-only button: the play/pause swap is driven by aria-pressed in CSS.
   btnSlideshow.setAttribute("aria-pressed", playing ? "true" : "false");
 }
 
-function stopSlideshow(): void {
+async function stopSlideshow(): Promise<void> {
   if (slideshowTimer !== null) {
     window.clearInterval(slideshowTimer);
     slideshowTimer = null;
@@ -1420,19 +1607,35 @@ function stopSlideshow(): void {
   updateSlideshowButton();
 }
 
-function startSlideshow(): void {
+async function startSlideshow(): Promise<void> {
   if (!listing || listing.entries.length < 2) {
     showToast("幻灯片需要当前目录中至少两张图片");
     return;
   }
   const seconds = Number(slideshowInterval.value) || 3;
-  slideshowTimer = window.setInterval(() => step(1, true), seconds * 1000);
+  slideshowTimer = window.setInterval(slideshowTick, seconds * 1000);
+  stage.classList.add("slideshow");
+  // Playback is about the image alone — tuck the filmstrip away, and remember
+  // it so stopping restores whatever the user had before.
+  if (thumbsVisible) {
+    thumbsHiddenBySlideshow = true;
+    setThumbsVisible(false);
+  }
+  // ...and step into fullscreen so the chrome gets out of the way.
+  if (!document.fullscreenElement) {
+    try {
+      await document.documentElement.requestFullscreen();
+      fullscreenEnteredBySlideshow = true;
+    } catch {
+      /* fullscreen refused — keep playing windowed */
+    }
+  }
   updateSlideshowButton();
 }
 
 function toggleSlideshow(): void {
-  if (slideshowTimer !== null) stopSlideshow();
-  else startSlideshow();
+  if (slideshowTimer !== null) void stopSlideshow();
+  else void startSlideshow();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1464,7 +1667,10 @@ type Theme = "dark" | "light";
 
 function applyTheme(theme: Theme): void {
   document.documentElement.dataset.theme = theme;
-  btnTheme.textContent = theme === "dark" ? "浅色" : "深色";
+  // Icon-only button: sun while light, moon while dark; the title mirrors the
+  // action the click will perform.
+  btnTheme.dataset.state = theme === "light" ? "on" : "off";
+  btnTheme.title = theme === "light" ? "切换到深色主题" : "切换到浅色主题";
   try {
     localStorage.setItem("lumina-theme", theme);
   } catch {
@@ -1528,10 +1734,11 @@ btnFlipV.addEventListener("click", toggleFlipV);
 btnResetTransform.addEventListener("click", resetTransform);
 btnSlideshow.addEventListener("click", toggleSlideshow);
 slideshowInterval.addEventListener("change", () => {
-  if (slideshowTimer !== null) {
-    stopSlideshow();
-    startSlideshow();
-  }
+  if (slideshowTimer === null) return;
+  // Re-arm in place: a stop/start cycle would drop and re-acquire fullscreen.
+  window.clearInterval(slideshowTimer);
+  const seconds = Number(slideshowInterval.value) || 3;
+  slideshowTimer = window.setInterval(slideshowTick, seconds * 1000);
 });
 
 /* ---------------------------- editing / files ---------------------------- */
@@ -1577,7 +1784,7 @@ btnPagePrev.addEventListener("click", () => void gotoPage((pageIndex ?? 0) - 1))
 btnPageNext.addEventListener("click", () => void gotoPage((pageIndex ?? 0) + 1));
 btnPageLive.addEventListener("click", () => void showLiveFrame());
 
-btnThumbs.addEventListener("click", () => setThumbsVisible(!thumbsVisible));
+btnThumbs.addEventListener("click", toggleThumbsVisible);
 btnInfo.addEventListener("click", () => setInfoVisible(!infoVisible));
 btnTheme.addEventListener("click", () => {
   applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
@@ -1587,10 +1794,19 @@ btnFullscreen.addEventListener("click", () => void toggleFullscreen());
 document.addEventListener("fullscreenchange", () => {
   const on = document.fullscreenElement !== null;
   document.body.classList.toggle("is-fullscreen", on);
-  btnFullscreen.textContent = on ? "退出全屏" : "全屏";
+  // Icon-only button: expand when windowed, compress while fullscreen.
+  btnFullscreen.dataset.state = on ? "on" : "off";
+  btnFullscreen.title = on ? "退出全屏 (F11)" : "全屏 (F11)";
 });
 
 thumbsTrack.addEventListener("click", (event) => {
+  btnSlideshow.title = playing ? "暂停幻灯片 (空格)" : "播放幻灯片 (空格)";
+}
+
+/** One slideshow beat: the flag asks `openPath` for a crossfade. */
+function slideshowTick(): void {
+  slideAdvance = true;
+  step(1, true);
   const button = (event.target as HTMLElement).closest<HTMLElement>(".thumb");
   if (!button || !listing) return;
   const entry = listing.entries[Number(button.dataset.index)];
@@ -1598,6 +1814,22 @@ thumbsTrack.addEventListener("click", (event) => {
 });
 
 // Wheel zoom, anchored at the cursor.
+  stage.classList.remove("slideshow");
+  clearGhost();
+  // Hand the filmstrip back if playback is what tucked it away.
+  if (thumbsHiddenBySlideshow) {
+    thumbsHiddenBySlideshow = false;
+    setThumbsVisible(true);
+  }
+  // Only give up fullscreen if playback is what took it.
+  if (fullscreenEnteredBySlideshow) {
+    fullscreenEnteredBySlideshow = false;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    } catch {
+      /* already out — nothing to restore */
+    }
+  }
 stage.addEventListener(
   "wheel",
   (event) => {
@@ -1635,6 +1867,12 @@ stage.addEventListener("pointerdown", (event) => {
     return;
   }
   dragging = true;
+/** User-initiated toggle — reclaims the panel from the slideshow's control. */
+function toggleThumbsVisible(): void {
+  thumbsHiddenBySlideshow = false;
+  setThumbsVisible(!thumbsVisible);
+}
+
   lastX = event.clientX;
   lastY = event.clientY;
   stage.classList.add("grabbing");
@@ -1671,11 +1909,21 @@ function endDrag(event: PointerEvent): void {
 stage.addEventListener("pointerup", endDrag);
 stage.addEventListener("pointercancel", endDrag);
 
-// Keep the image framed when the window resizes.
+// Keep the image framed when the window resizes. A drag or a maximize/restore
+// animation fires `resize` far faster than the compositor can consume, and each
+// re-fit reads layout, so coalesce to at most one update per animation frame —
+// running it per event is what made resizing stutter.
+let resizeFrame = 0;
 window.addEventListener("resize", () => {
-  if (!meta) return;
-  if (fitActive) zoomToFit();
-  else if (cropActive) syncCropOverlay();
+  if (resizeFrame !== 0) return;
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = 0;
+    // The toolbar reflows on resize, so a pinned popover needs re-anchoring.
+    if (menuOpen) positionMenu();
+    if (!meta) return;
+    if (fitActive) zoomToFit();
+    else if (cropActive) syncCropOverlay();
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1779,6 +2027,49 @@ window.addEventListener("keydown", (event) => {
       break;
     case "R":
       rotateBy(-90);
+/* ------------------------------- more menu ------------------------------- */
+
+let menuOpen = false;
+
+/**
+ * Drop the popover under its trigger. The toolbar is centered, so the trigger
+ * is nowhere near a fixed edge — measure instead of relying on a CSS anchor.
+ * Clamped so the panel never spills past the bar.
+ */
+function positionMenu(): void {
+  const bar = toolbar.getBoundingClientRect();
+  const btn = btnMore.getBoundingClientRect();
+  const maxLeft = bar.width - moreMenu.offsetWidth - 8;
+  moreMenu.style.left = `${Math.max(8, Math.min(btn.left - bar.left, maxLeft))}px`;
+}
+
+function setMenuOpen(open: boolean): void {
+  menuOpen = open;
+  moreMenu.hidden = !open;
+  btnMore.setAttribute("aria-expanded", open ? "true" : "false");
+  // Measured after the panel is visible, or its width reads as zero.
+  if (open) positionMenu();
+}
+
+btnMore.addEventListener("click", () => setMenuOpen(!menuOpen));
+
+// Dismiss on a click outside. `pointerdown` runs before the button's own click,
+// so clicking the trigger never double-toggles.
+document.addEventListener("pointerdown", (event) => {
+  if (!menuOpen) return;
+  const node = event.target as HTMLElement;
+  if (node.closest("#more-menu") || node.closest("#btn-more")) return;
+  setMenuOpen(false);
+});
+
+// Acting on an item closes the popover; the two <select> rows stay open so the
+// user can change a value without the menu vanishing under the pointer.
+moreMenu.addEventListener("click", (event) => {
+  const node = event.target as HTMLElement;
+  if (node.closest("select")) return;
+  if (node.closest("button")) setMenuOpen(false);
+});
+
       break;
     case "l":
     case "L":
@@ -1797,7 +2088,7 @@ window.addEventListener("keydown", (event) => {
     case "T":
     case "b":
     case "B":
-      setThumbsVisible(!thumbsVisible);
+      toggleThumbsVisible();
       break;
     case "i":
     case "I":
@@ -1821,9 +2112,10 @@ window.addEventListener("keydown", (event) => {
       break;
 
     case "Escape":
-      if (document.fullscreenElement) void document.exitFullscreen();
+      if (menuOpen) setMenuOpen(false);
+      else if (document.fullscreenElement) void document.exitFullscreen();
       else if (cropActive) setCropMode(false);
-      else if (slideshowTimer !== null) stopSlideshow();
+      else if (slideshowTimer !== null) void stopSlideshow();
       break;
 
     default:
@@ -1847,3 +2139,18 @@ updateStatus();
 updateSlideshowButton();
 updatePageControls();
 wireDragAndDrop();
+    } else if (key === "c" && event.shiftKey) {
+      // Matches "copy as path" in Explorer / Finder muscle memory.
+      event.preventDefault();
+      void copyCurrentPath();
+    case "Delete":
+      event.preventDefault();
+      void removeCurrent();
+      break;
+
+    case "F2":
+      event.preventDefault();
+      if (currentPath) openRenameModal(currentPath);
+      break;
+
+void onDirectoryChanged(handleDirectoryChanged);
