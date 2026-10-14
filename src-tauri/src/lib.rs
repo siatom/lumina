@@ -6,11 +6,13 @@
 //! - [`protocol`]    : custom `lumina://` URI scheme used to stream image bytes
 //! - [`cache`]       : process-wide LRU for generated thumbnails
 //! - [`watcher`]     : filesystem watch on the browsed folder
+//! - [`file_assoc`]  : operating-system file association + per-format icons
 //! - [`error`]       : shared typed error
 
 mod cache;
 mod commands;
 mod error;
+mod file_assoc;
 mod imaging;
 mod protocol;
 mod watcher;
@@ -41,6 +43,9 @@ pub fn run() {
             commands::delete_file,
             commands::watch_directory,
             commands::unwatch_directory,
+            commands::get_association_status,
+            commands::set_file_association,
+            commands::open_default_apps_settings,
             commands::get_protocol_base,
         ])
         .run(tauri::generate_context!())

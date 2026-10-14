@@ -27,6 +27,7 @@ import {
   confirmAction,
   copyPathToClipboard,
   deleteFile,
+  getAssociationStatus,
   getImageBlob,
   getImageFrame,
   getImageMetadata,
@@ -34,22 +35,50 @@ import {
   getThumbnail,
   listImages,
   luminaImageUrl,
-  onFileDrop,
   onDirectoryChanged,
+  onFileDrop,
+  openDefaultAppsSettings,
   pickFolder,
   pickImage,
   pickSavePathFor,
   protocolBase,
   renameFile,
   saveImageAs,
+  setFileAssociation,
   transformImage,
+  unwatchDirectory,
+  watchDirectory,
+  type AssocStatus,
   type CropRect,
   type DirectoryListing,
   type ImageEntry,
-  unwatchDirectory,
-  watchDirectory,
   type ImageMetadata,
 } from "./api";
+
+// The per-format file icons, shown in the association panel. These are the same
+// SVG files `cargo run --bin gen-file-icons` rasterises into the `.ico`
+// resources Windows hangs off each extension, so the preview and what Explorer
+// ends up drawing come from one design source.
+import iconBmp from "../assets/file-icons/bmp.svg";
+import iconGif from "../assets/file-icons/gif.svg";
+import iconIco from "../assets/file-icons/ico.svg";
+import iconJpg from "../assets/file-icons/jpg.svg";
+import iconPng from "../assets/file-icons/png.svg";
+import iconSvg from "../assets/file-icons/svg.svg";
+import iconTiff from "../assets/file-icons/tiff.svg";
+import iconWebp from "../assets/file-icons/webp.svg";
+
+/** Icon key (from `AssocFormat.key`) to its bundled asset URL. */
+const FORMAT_ICONS: Record<string, string> = {
+  png: iconPng,
+  jpg: iconJpg,
+  gif: iconGif,
+  webp: iconWebp,
+  bmp: iconBmp,
+  tiff: iconTiff,
+  ico: iconIco,
+  svg: iconSvg,
+};
 
 /* -------------------------------------------------------------------------- */
 /* DOM                                                                         */
@@ -77,7 +106,10 @@ function versionOf(entry: ImageEntry): string {
 
 const stage = el<HTMLElement>("stage");
 const viewer = el<HTMLImageElement>("viewer");
+const ghostLayer = el<HTMLElement>("ghost-layer");
+const ghostImg = el<HTMLImageElement>("viewer-ghost");
 const emptyHint = el<HTMLElement>("empty-hint");
+const emptyMessage = el<HTMLElement>("empty-message");
 const toast = el<HTMLElement>("toast");
 const cropOverlay = el<HTMLElement>("crop-overlay");
 const dropHint = el<HTMLElement>("drop-hint");
@@ -105,14 +137,16 @@ const cropX = el<HTMLInputElement>("crop-x");
 const cropY = el<HTMLInputElement>("crop-y");
 const cropW = el<HTMLInputElement>("crop-w");
 const cropH = el<HTMLInputElement>("crop-h");
-const ghostLayer = el<HTMLElement>("ghost-layer");
-const ghostImg = el<HTMLImageElement>("viewer-ghost");
 
-const emptyMessage = el<HTMLElement>("empty-message");
 const renameModal = el<HTMLElement>("rename-modal");
 const renameInput = el<HTMLInputElement>("rename-input");
 const renameSub = el<HTMLElement>("rename-sub");
 const renameError = el<HTMLElement>("rename-error");
+
+const assocModal = el<HTMLElement>("assoc-modal");
+const assocNote = el<HTMLElement>("assoc-note");
+const assocList = el<HTMLElement>("assoc-list");
+const assocError = el<HTMLElement>("assoc-error");
 
 const btnOpen = el<HTMLButtonElement>("btn-open");
 const btnOpenFolder = el<HTMLButtonElement>("btn-open-folder");
@@ -146,8 +180,17 @@ const btnThumbs = el<HTMLButtonElement>("btn-thumbs");
 const btnInfo = el<HTMLButtonElement>("btn-info");
 const btnTheme = el<HTMLButtonElement>("btn-theme");
 const btnFullscreen = el<HTMLButtonElement>("btn-fullscreen");
+const btnMore = el<HTMLButtonElement>("btn-more");
+const moreMenu = el<HTMLElement>("more-menu");
+const toolbar = el<HTMLElement>("toolbar");
 const btnRenameCancel = el<HTMLButtonElement>("btn-rename-cancel");
 const btnRenameConfirm = el<HTMLButtonElement>("btn-rename-confirm");
+const btnSettings = el<HTMLButtonElement>("btn-settings");
+const btnAssocAll = el<HTMLButtonElement>("btn-assoc-all");
+const btnAssocNone = el<HTMLButtonElement>("btn-assoc-none");
+const btnAssocSystem = el<HTMLButtonElement>("btn-assoc-system");
+const btnAssocClose = el<HTMLButtonElement>("btn-assoc-close");
+const btnAssocApply = el<HTMLButtonElement>("btn-assoc-apply");
 
 /* -------------------------------------------------------------------------- */
 /* State                                                                       */
@@ -179,11 +222,19 @@ let viewerFellBack = false;
 let viewerBlobUrl: string | null = null;
 
 /** Panel visibility, tracked explicitly (the DOM `hidden` prop is tri-state). */
-const btnMore = el<HTMLButtonElement>("btn-more");
-const moreMenu = el<HTMLElement>("more-menu");
-const toolbar = el<HTMLElement>("toolbar");
 let thumbsVisible = true;
 let infoVisible = false;
+/** True while playback is what tucked the filmstrip away, so stopping restores it. */
+let thumbsHiddenBySlideshow = false;
+
+/** Crossfade length; mirrors `--slide-ms` in styles.css. */
+const SLIDE_MS = 520;
+/** Set by the slideshow tick so the next open crossfades instead of cutting. */
+let slideAdvance = false;
+/** True when the slideshow itself went fullscreen, so stopping can hand it back. */
+let fullscreenEnteredBySlideshow = false;
+let ghostTimer: number | null = null;
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 /** Monotonic token so a slow open cannot overwrite a newer one. */
 let openToken = 0;
@@ -206,6 +257,11 @@ let cropActive = false;
 /** True while the rename modal is open; suppresses file-switch shortcuts. */
 let renaming = false;
 
+/** True while the settings modal is open; also suppresses shortcuts. */
+let assocOpen = false;
+/** Last association report from the backend; the baseline the checkboxes diff against. */
+let assocStatus: AssocStatus | null = null;
+
 /** JPEG quality for save-as / transform, shared by both entry points. */
 function quality(): number {
   return Number(qualitySelect.value) || 85;
@@ -223,17 +279,6 @@ function clampScale(value: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
 }
 
-/** True while playback is what tucked the filmstrip away, so stopping restores it. */
-let thumbsHiddenBySlideshow = false;
-
-/** Crossfade length; mirrors `--slide-ms` in styles.css. */
-const SLIDE_MS = 520;
-/** Set by the slideshow tick so the next open crossfades instead of cutting. */
-let slideAdvance = false;
-/** True when the slideshow itself went fullscreen, so stopping can hand it back. */
-let fullscreenEnteredBySlideshow = false;
-let ghostTimer: number | null = null;
-const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 /**
  * Dimensions as the viewer actually renders them.
  *
@@ -280,6 +325,8 @@ function origin(): { ox: number; oy: number } {
     oy: ty + scale * cy - (a * sin + b * cos),
   };
 }
+
+let lastZoomLabel = "";
 
 function applyTransform(): void {
   if (meta) {
@@ -329,8 +376,6 @@ function stageToImage(sx: number, sy: number): { x: number; y: number } {
     y: (dx * sin + dy * cos) / (scale * (flipV ? -1 : 1)),
   };
 }
-
-let lastZoomLabel = "";
 
 /** Scale that fits the whole (rotated) image inside the stage, never upscaling. */
 function fitScale(): number {
@@ -552,6 +597,7 @@ function addInfoRow(label: string, value: string | null | undefined, wrap = fals
   const dd = document.createElement("dd");
   dd.textContent = value;
   dd.title = value;
+  if (wrap) dd.classList.add("wrap");
   infoList.append(dt, dd);
 }
 
@@ -573,6 +619,7 @@ function formatLongitude(value: number): string {
 
 function renderInfo(m: ImageMetadata): void {
   infoList.replaceChildren();
+  addInfoSub("文件");
   addInfoRow("文件名", m.file_name);
   addInfoRow("格式", m.format.toUpperCase());
   addInfoRow("尺寸", `${m.width} × ${m.height}`);
@@ -596,7 +643,6 @@ function renderInfo(m: ImageMetadata): void {
   addInfoRow("描述", e.description, true);
   addInfoRow("软件", e.software);
 
-  if (wrap) dd.classList.add("wrap");
   const hasGps =
     e.gps_latitude !== null || e.gps_longitude !== null || e.gps_altitude !== null;
   if (hasGps) {
@@ -618,7 +664,6 @@ function renderInfo(m: ImageMetadata): void {
 const THUMB_CONCURRENCY = 6;
 
 /** Tiles waiting for a free slot in the loading pool. */
-  addInfoSub("文件");
 const thumbQueue: HTMLImageElement[] = [];
 let thumbsInFlight = 0;
 
@@ -776,54 +821,6 @@ function reconcileViewerDims(): void {
   reflow();
 }
 
-async function openPath(path: string): Promise<void> {
-  const token = ++openToken;
-
-  let m: ImageMetadata;
-  try {
-    m = await getImageMetadata(path);
-  } catch (err) {
-    showPlaceholder(`无法打开：${String(err)}`);
-    return;
-  }
-  if (token !== openToken) return;
-
-  // The webview rotates EXIF-oriented images itself, so `meta` must carry the
-  // *display* dimensions (stored header dims swapped for orientation 5–8) — the
-  // whole view/fit/crop maths, and the backend's `decode_oriented`, share that
-  // space.
-  const dims = orientedDims(m);
-  const oriented: ImageMetadata = { ...m, width: dims.w, height: dims.h };
-  meta = oriented;
-  currentPath = m.path;
-  fileDims = { w: dims.w, h: dims.h };
-  viewerFellBack = false;
-  releaseViewerBlob();
-  rotation = 0;
-  flipH = false;
-  flipV = false;
-  pageCount = 1;
-  pageIndex = null;
-  setCropMode(false);
-
-  emptyHint.hidden = true;
-  emptyHint.classList.remove("is-message");
-  emptyMessage.hidden = true;
-  // While animating, the ghost covers the stage: the viewer stays dark until
-  // the incoming frame has decoded, then crossfades in.
-  if (!animate || !parkViewerInGhost()) viewer.classList.add("visible");
-  renderInfo(oriented);
-  updateStatus();
-  updateControlsEnabled();
-  updatePageControls();
-
-  // Put the image on screen before anything that is not required to show it.
-  const url = await luminaImageUrl(m.path, {
-    mode: "full",
-    version: `${m.modified_ms}-${m.file_size}`,
-  });
-  if (token !== openToken) return;
-  viewer.src = url;
 /* -------------------------------------------------------------------------- */
 /* Slideshow transition                                                        */
 /* -------------------------------------------------------------------------- */
@@ -874,6 +871,64 @@ function clearGhost(): void {
   ghostImg.style.height = "";
 }
 
+async function openPath(path: string): Promise<void> {
+  const token = ++openToken;
+
+  let m: ImageMetadata;
+  try {
+    m = await getImageMetadata(path);
+  } catch (err) {
+    showPlaceholder(`无法打开：${String(err)}`);
+    return;
+  }
+  if (token !== openToken) return;
+
+  // Decide the transition style before `currentPath` is reassigned below: a
+  // slideshow advance crossfades, every other open cuts.
+  const animate =
+    slideAdvance &&
+    !reduceMotion.matches &&
+    currentPath !== null &&
+    currentPath !== m.path &&
+    viewer.classList.contains("visible");
+  slideAdvance = false;
+
+  // The webview rotates EXIF-oriented images itself, so `meta` must carry the
+  // *display* dimensions (stored header dims swapped for orientation 5–8) — the
+  // whole view/fit/crop maths, and the backend's `decode_oriented`, share that
+  // space.
+  const dims = orientedDims(m);
+  const oriented: ImageMetadata = { ...m, width: dims.w, height: dims.h };
+  meta = oriented;
+  currentPath = m.path;
+  fileDims = { w: dims.w, h: dims.h };
+  viewerFellBack = false;
+  releaseViewerBlob();
+  rotation = 0;
+  flipH = false;
+  flipV = false;
+  pageCount = 1;
+  pageIndex = null;
+  setCropMode(false);
+
+  emptyHint.hidden = true;
+  emptyHint.classList.remove("is-message");
+  emptyMessage.hidden = true;
+  // While animating, the ghost covers the stage: the viewer stays dark until
+  // the incoming frame has decoded, then crossfades in.
+  if (!animate || !parkViewerInGhost()) viewer.classList.add("visible");
+  renderInfo(oriented);
+  updateStatus();
+  updateControlsEnabled();
+  updatePageControls();
+
+  // Put the image on screen before anything that is not required to show it.
+  const url = await luminaImageUrl(m.path, {
+    mode: "full",
+    version: `${m.modified_ms}-${m.file_size}`,
+  });
+  if (token !== openToken) return;
+  viewer.src = url;
 
   // Safety net: the decoded bitmap is authoritative. If the engine's orientation
   // differs from what the EXIF tag predicted (missing tag, unusual container),
@@ -887,16 +942,6 @@ function clearGhost(): void {
     },
     { once: true },
   );
-
-  // Decide the transition style before `currentPath` is reassigned below: a
-  // slideshow advance crossfades, every other open cuts.
-  const animate =
-    slideAdvance &&
-    !reduceMotion.matches &&
-    currentPath !== null &&
-    currentPath !== m.path &&
-    viewer.classList.contains("visible");
-  slideAdvance = false;
 
   // Fit uses the metadata dimensions, so it does not wait for `load`.
   zoomToFit();
@@ -942,6 +987,9 @@ function clearGhost(): void {
     clearThumbs();
   }
 
+  // Keep the filmstrip in step with the folder from here on.
+  if (listing) ensureWatching(listing.dir);
+
   preloadNeighbours(m.path);
 }
 
@@ -986,9 +1034,6 @@ async function preloadImage(entry: ImageEntry): Promise<void> {
   } catch {
     preloadCache.delete(key);
   }
-  // Keep the filmstrip in step with the folder from here on.
-  if (listing) ensureWatching(listing.dir);
-
 }
 
 async function openDirectory(dir: string): Promise<void> {
@@ -1011,50 +1056,6 @@ async function openDirectory(dir: string): Promise<void> {
   await openPath(list.entries[0].path);
 }
 
-function updateNavigation(): void {
-  const enabled = listing !== null && listing.entries.length > 1;
-  btnPrev.disabled = !enabled;
-  btnNext.disabled = !enabled;
-}
-
-function step(delta: number, wrap = false): void {
-  if (!listing || !currentPath) return;
-  const count = listing.entries.length;
-  const index = listing.entries.findIndex((e) => e.path === currentPath);
-  if (index < 0) return;
-  let next = index + delta;
-  if (wrap) next = (next + count) % count;
-  if (next < 0 || next >= count) return;
-  void openPath(listing.entries[next].path);
-}
-
-function jumpTo(index: number): void {
-  if (!listing || listing.entries.length === 0) return;
-  const i = index < 0 ? listing.entries.length - 1 : index;
-  const entry = listing.entries[i];
-  if (entry) void openPath(entry.path);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Output helpers (save-as / transform)                                        */
-/* -------------------------------------------------------------------------- */
-
-const ENCODABLE: readonly string[] = ENCODABLE_EXTENSIONS;
-
-function baseName(path: string): string {
-  const sep = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
-  return sep >= 0 ? path.slice(sep + 1) : path;
-}
-
-function joinPath(dir: string, name: string): string {
-  const sep = dir.includes("\\") ? "\\" : "/";
-  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
-}
-
-/** Output extension for a source image, falling back to PNG when unencodable. */
-function encodableExt(m: ImageMetadata): string {
-  const ext = m.format.toLowerCase();
-  return ENCODABLE.includes(ext) ? ext : "png";
 /* -------------------------------------------------------------------------- */
 /* Filesystem watch                                                            */
 /* -------------------------------------------------------------------------- */
@@ -1141,6 +1142,50 @@ function handleDirectoryChanged(dir: string): void {
   void refreshListing();
 }
 
+function updateNavigation(): void {
+  const enabled = listing !== null && listing.entries.length > 1;
+  btnPrev.disabled = !enabled;
+  btnNext.disabled = !enabled;
+}
+
+function step(delta: number, wrap = false): void {
+  if (!listing || !currentPath) return;
+  const count = listing.entries.length;
+  const index = listing.entries.findIndex((e) => e.path === currentPath);
+  if (index < 0) return;
+  let next = index + delta;
+  if (wrap) next = (next + count) % count;
+  if (next < 0 || next >= count) return;
+  void openPath(listing.entries[next].path);
+}
+
+function jumpTo(index: number): void {
+  if (!listing || listing.entries.length === 0) return;
+  const i = index < 0 ? listing.entries.length - 1 : index;
+  const entry = listing.entries[i];
+  if (entry) void openPath(entry.path);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Output helpers (save-as / transform)                                        */
+/* -------------------------------------------------------------------------- */
+
+const ENCODABLE: readonly string[] = ENCODABLE_EXTENSIONS;
+
+function baseName(path: string): string {
+  const sep = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return sep >= 0 ? path.slice(sep + 1) : path;
+}
+
+function joinPath(dir: string, name: string): string {
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+}
+
+/** Output extension for a source image, falling back to PNG when unencodable. */
+function encodableExt(m: ImageMetadata): string {
+  const ext = m.format.toLowerCase();
+  return ENCODABLE.includes(ext) ? ext : "png";
 }
 
 /** Default "save as" target: sibling of the source, same format, suffixed. */
@@ -1479,6 +1524,143 @@ async function submitRename(): Promise<void> {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* File association                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** Rows are rebuilt from scratch on every open: eight nodes, so no diffing. */
+function renderAssocFormats(status: AssocStatus): void {
+  assocList.replaceChildren();
+  assocList.classList.toggle("is-readonly", !status.can_associate);
+
+  for (const format of status.formats) {
+    const row = document.createElement("label");
+    row.className = "assoc-row";
+    row.dataset.key = format.key;
+
+    const icon = document.createElement("img");
+    icon.className = "assoc-icon";
+    icon.src = FORMAT_ICONS[format.key] ?? "";
+    icon.alt = "";
+    icon.draggable = false;
+
+    const text = document.createElement("span");
+    text.className = "assoc-text";
+    const ext = document.createElement("span");
+    ext.className = "assoc-ext";
+    ext.textContent = format.ext.map((e) => `.${e}`).join("  ");
+    const label = document.createElement("span");
+    label.className = "assoc-label";
+    label.textContent = format.label;
+    text.append(ext, label);
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = format.associated;
+    check.disabled = !status.can_associate;
+
+    row.append(icon, text, check);
+    assocList.append(row);
+  }
+}
+
+function assocCheckbox(key: string): HTMLInputElement | null {
+  return assocList.querySelector<HTMLInputElement>(
+    `.assoc-row[data-key="${key}"] input[type="checkbox"]`,
+  );
+}
+
+function showAssocError(text: string): void {
+  assocError.textContent = text;
+  assocError.hidden = false;
+}
+
+function setAssocBusy(busy: boolean): void {
+  btnAssocApply.disabled = busy;
+  btnAssocAll.disabled = busy;
+  btnAssocNone.disabled = busy;
+}
+
+async function openAssocPanel(): Promise<void> {
+  assocOpen = true;
+  assocError.hidden = true;
+  assocModal.hidden = false;
+  btnSettings.setAttribute("aria-expanded", "true");
+  try {
+    assocStatus = await getAssociationStatus();
+  } catch (err) {
+    showAssocError(`读取关联状态失败：${String(err)}`);
+    return;
+  }
+  assocNote.textContent = assocStatus.note;
+  renderAssocFormats(assocStatus);
+  // "Open system settings" is only meaningful where the OS has such a page.
+  btnAssocSystem.hidden = assocStatus.platform !== "windows";
+  btnAssocSystem.disabled = !assocStatus.can_set_default;
+  setAssocBusy(false);
+}
+
+function closeAssocPanel(): void {
+  assocOpen = false;
+  assocModal.hidden = true;
+  btnSettings.setAttribute("aria-expanded", "false");
+}
+
+function setAllAssocChecks(checked: boolean): void {
+  for (const box of assocList.querySelectorAll<HTMLInputElement>("input[type=checkbox]")) {
+    if (!box.disabled) box.checked = checked;
+  }
+}
+
+/**
+ * Push the toggle diff to the backend.
+ *
+ * Sends two batches rather than the full desired set: registering and
+ * withdrawing are different operations, and a single "set everything to X"
+ * would rewrite rows the user never touched (and re-run `SHChangeNotify` for
+ * them). The refreshed status the command returns is authoritative.
+ */
+async function applyAssocChanges(): Promise<void> {
+  if (!assocStatus) return;
+
+  const toEnable: string[] = [];
+  const toDisable: string[] = [];
+  for (const format of assocStatus.formats) {
+    const box = assocCheckbox(format.key);
+    if (!box || box.disabled) continue;
+    if (box.checked === format.associated) continue;
+    (box.checked ? toEnable : toDisable).push(...format.ext);
+  }
+
+  if (toEnable.length === 0 && toDisable.length === 0) {
+    showToast("没有需要应用的变更");
+    return;
+  }
+
+  setAssocBusy(true);
+  assocError.hidden = true;
+  try {
+    let next = assocStatus;
+    if (toEnable.length > 0) next = await setFileAssociation(toEnable, true);
+    if (toDisable.length > 0) next = await setFileAssociation(toDisable, false);
+    assocStatus = next;
+    renderAssocFormats(next);
+    const changed = toEnable.length + toDisable.length;
+    showToast(`已更新 ${changed} 个扩展名的关联`);
+  } catch (err) {
+    showAssocError(`应用关联失败：${String(err)}`);
+    // The rows may now disagree with the registry; re-read the truth.
+    try {
+      assocStatus = await getAssociationStatus();
+      renderAssocFormats(assocStatus);
+    } catch {
+      /* keep the error message on screen */
+    }
+  } finally {
+    setAssocBusy(false);
+  }
+}
+
 /** Clear every per-file bit of state and show the placeholder again. */
 function resetViewerState(message: string): void {
   void stopSlideshow();
@@ -1597,12 +1779,35 @@ function updateSlideshowButton(): void {
   const playing = slideshowTimer !== null;
   // Icon-only button: the play/pause swap is driven by aria-pressed in CSS.
   btnSlideshow.setAttribute("aria-pressed", playing ? "true" : "false");
+  btnSlideshow.title = playing ? "暂停幻灯片 (空格)" : "播放幻灯片 (空格)";
+}
+
+/** One slideshow beat: the flag asks `openPath` for a crossfade. */
+function slideshowTick(): void {
+  slideAdvance = true;
+  step(1, true);
 }
 
 async function stopSlideshow(): Promise<void> {
   if (slideshowTimer !== null) {
     window.clearInterval(slideshowTimer);
     slideshowTimer = null;
+  }
+  stage.classList.remove("slideshow");
+  clearGhost();
+  // Hand the filmstrip back if playback is what tucked it away.
+  if (thumbsHiddenBySlideshow) {
+    thumbsHiddenBySlideshow = false;
+    setThumbsVisible(true);
+  }
+  // Only give up fullscreen if playback is what took it.
+  if (fullscreenEnteredBySlideshow) {
+    fullscreenEnteredBySlideshow = false;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    } catch {
+      /* already out — nothing to restore */
+    }
   }
   updateSlideshowButton();
 }
@@ -1655,6 +1860,12 @@ function setThumbsVisible(visible: boolean): void {
   thumbsVisible = visible;
   thumbs.hidden = !visible;
   btnThumbs.setAttribute("aria-pressed", visible ? "true" : "false");
+}
+
+/** User-initiated toggle — reclaims the panel from the slideshow's control. */
+function toggleThumbsVisible(): void {
+  thumbsHiddenBySlideshow = false;
+  setThumbsVisible(!thumbsVisible);
 }
 
 function setInfoVisible(visible: boolean): void {
@@ -1778,6 +1989,20 @@ renameModal.addEventListener("pointerdown", (event) => {
 btnDelete.addEventListener("click", () => void removeCurrent());
 btnCopyPath.addEventListener("click", () => void copyCurrentPath());
 
+/* --------------------------- settings / association ---------------------- */
+
+btnSettings.addEventListener("click", () => void openAssocPanel());
+btnAssocClose.addEventListener("click", closeAssocPanel);
+btnAssocAll.addEventListener("click", () => setAllAssocChecks(true));
+btnAssocNone.addEventListener("click", () => setAllAssocChecks(false));
+btnAssocApply.addEventListener("click", () => void applyAssocChanges());
+btnAssocSystem.addEventListener("click", () => {
+  void openDefaultAppsSettings().catch((err: unknown) => showAssocError(String(err)));
+});
+assocModal.addEventListener("pointerdown", (event) => {
+  if (event.target === assocModal) closeAssocPanel();
+});
+
 /* ------------------------------- pages ---------------------------------- */
 
 btnPagePrev.addEventListener("click", () => void gotoPage((pageIndex ?? 0) - 1));
@@ -1791,6 +2016,49 @@ btnTheme.addEventListener("click", () => {
 });
 btnFullscreen.addEventListener("click", () => void toggleFullscreen());
 
+/* ------------------------------- more menu ------------------------------- */
+
+let menuOpen = false;
+
+/**
+ * Drop the popover under its trigger. The toolbar is centered, so the trigger
+ * is nowhere near a fixed edge — measure instead of relying on a CSS anchor.
+ * Clamped so the panel never spills past the bar.
+ */
+function positionMenu(): void {
+  const bar = toolbar.getBoundingClientRect();
+  const btn = btnMore.getBoundingClientRect();
+  const maxLeft = bar.width - moreMenu.offsetWidth - 8;
+  moreMenu.style.left = `${Math.max(8, Math.min(btn.left - bar.left, maxLeft))}px`;
+}
+
+function setMenuOpen(open: boolean): void {
+  menuOpen = open;
+  moreMenu.hidden = !open;
+  btnMore.setAttribute("aria-expanded", open ? "true" : "false");
+  // Measured after the panel is visible, or its width reads as zero.
+  if (open) positionMenu();
+}
+
+btnMore.addEventListener("click", () => setMenuOpen(!menuOpen));
+
+// Dismiss on a click outside. `pointerdown` runs before the button's own click,
+// so clicking the trigger never double-toggles.
+document.addEventListener("pointerdown", (event) => {
+  if (!menuOpen) return;
+  const node = event.target as HTMLElement;
+  if (node.closest("#more-menu") || node.closest("#btn-more")) return;
+  setMenuOpen(false);
+});
+
+// Acting on an item closes the popover; the two <select> rows stay open so the
+// user can change a value without the menu vanishing under the pointer.
+moreMenu.addEventListener("click", (event) => {
+  const node = event.target as HTMLElement;
+  if (node.closest("select")) return;
+  if (node.closest("button")) setMenuOpen(false);
+});
+
 document.addEventListener("fullscreenchange", () => {
   const on = document.fullscreenElement !== null;
   document.body.classList.toggle("is-fullscreen", on);
@@ -1800,13 +2068,6 @@ document.addEventListener("fullscreenchange", () => {
 });
 
 thumbsTrack.addEventListener("click", (event) => {
-  btnSlideshow.title = playing ? "暂停幻灯片 (空格)" : "播放幻灯片 (空格)";
-}
-
-/** One slideshow beat: the flag asks `openPath` for a crossfade. */
-function slideshowTick(): void {
-  slideAdvance = true;
-  step(1, true);
   const button = (event.target as HTMLElement).closest<HTMLElement>(".thumb");
   if (!button || !listing) return;
   const entry = listing.entries[Number(button.dataset.index)];
@@ -1814,22 +2075,6 @@ function slideshowTick(): void {
 });
 
 // Wheel zoom, anchored at the cursor.
-  stage.classList.remove("slideshow");
-  clearGhost();
-  // Hand the filmstrip back if playback is what tucked it away.
-  if (thumbsHiddenBySlideshow) {
-    thumbsHiddenBySlideshow = false;
-    setThumbsVisible(true);
-  }
-  // Only give up fullscreen if playback is what took it.
-  if (fullscreenEnteredBySlideshow) {
-    fullscreenEnteredBySlideshow = false;
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-    } catch {
-      /* already out — nothing to restore */
-    }
-  }
 stage.addEventListener(
   "wheel",
   (event) => {
@@ -1867,12 +2112,6 @@ stage.addEventListener("pointerdown", (event) => {
     return;
   }
   dragging = true;
-/** User-initiated toggle — reclaims the panel from the slideshow's control. */
-function toggleThumbsVisible(): void {
-  thumbsHiddenBySlideshow = false;
-  setThumbsVisible(!thumbsVisible);
-}
-
   lastX = event.clientX;
   lastY = event.clientY;
   stage.classList.add("grabbing");
@@ -1950,6 +2189,17 @@ window.addEventListener("keydown", (event) => {
     }
     return;
   }
+  // So does the settings modal — but Enter applies, matching the primary button.
+  if (assocOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAssocPanel();
+    } else if (event.key === "Enter" && !isEditable(event.target)) {
+      event.preventDefault();
+      void applyAssocChanges();
+    }
+    return;
+  }
   if (event.ctrlKey || event.metaKey) {
     const key = event.key.toLowerCase();
     if (key === "o") {
@@ -1958,6 +2208,14 @@ window.addEventListener("keydown", (event) => {
     } else if (key === "s") {
       event.preventDefault();
       void saveAs();
+    } else if (key === "c" && event.shiftKey) {
+      // Matches "copy as path" in Explorer / Finder muscle memory.
+      event.preventDefault();
+      void copyCurrentPath();
+    } else if (key === ",") {
+      // The conventional "preferences" shortcut.
+      event.preventDefault();
+      void openAssocPanel();
     }
     return;
   }
@@ -2027,49 +2285,6 @@ window.addEventListener("keydown", (event) => {
       break;
     case "R":
       rotateBy(-90);
-/* ------------------------------- more menu ------------------------------- */
-
-let menuOpen = false;
-
-/**
- * Drop the popover under its trigger. The toolbar is centered, so the trigger
- * is nowhere near a fixed edge — measure instead of relying on a CSS anchor.
- * Clamped so the panel never spills past the bar.
- */
-function positionMenu(): void {
-  const bar = toolbar.getBoundingClientRect();
-  const btn = btnMore.getBoundingClientRect();
-  const maxLeft = bar.width - moreMenu.offsetWidth - 8;
-  moreMenu.style.left = `${Math.max(8, Math.min(btn.left - bar.left, maxLeft))}px`;
-}
-
-function setMenuOpen(open: boolean): void {
-  menuOpen = open;
-  moreMenu.hidden = !open;
-  btnMore.setAttribute("aria-expanded", open ? "true" : "false");
-  // Measured after the panel is visible, or its width reads as zero.
-  if (open) positionMenu();
-}
-
-btnMore.addEventListener("click", () => setMenuOpen(!menuOpen));
-
-// Dismiss on a click outside. `pointerdown` runs before the button's own click,
-// so clicking the trigger never double-toggles.
-document.addEventListener("pointerdown", (event) => {
-  if (!menuOpen) return;
-  const node = event.target as HTMLElement;
-  if (node.closest("#more-menu") || node.closest("#btn-more")) return;
-  setMenuOpen(false);
-});
-
-// Acting on an item closes the popover; the two <select> rows stay open so the
-// user can change a value without the menu vanishing under the pointer.
-moreMenu.addEventListener("click", (event) => {
-  const node = event.target as HTMLElement;
-  if (node.closest("select")) return;
-  if (node.closest("button")) setMenuOpen(false);
-});
-
       break;
     case "l":
     case "L":
@@ -2106,6 +2321,16 @@ moreMenu.addEventListener("click", (event) => {
       toggleSlideshow();
       break;
 
+    case "Delete":
+      event.preventDefault();
+      void removeCurrent();
+      break;
+
+    case "F2":
+      event.preventDefault();
+      if (currentPath) openRenameModal(currentPath);
+      break;
+
     case "F11":
       event.preventDefault();
       void toggleFullscreen();
@@ -2139,18 +2364,4 @@ updateStatus();
 updateSlideshowButton();
 updatePageControls();
 wireDragAndDrop();
-    } else if (key === "c" && event.shiftKey) {
-      // Matches "copy as path" in Explorer / Finder muscle memory.
-      event.preventDefault();
-      void copyCurrentPath();
-    case "Delete":
-      event.preventDefault();
-      void removeCurrent();
-      break;
-
-    case "F2":
-      event.preventDefault();
-      if (currentPath) openRenameModal(currentPath);
-      break;
-
 void onDirectoryChanged(handleDirectoryChanged);

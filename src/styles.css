@@ -14,10 +14,9 @@ html[data-theme="dark"] {
   --text-faint: #6c6c7a;
   --accent: #4c8dff;
   --accent-soft: #4c8dff33;
-  --stage-bg: #131316;
   --stage-check-a: #1a1a1e;
-  --empty-glow: #4c8dff1c;
   --stage-check-b: #131316;
+  --empty-glow: #4c8dff1c;
   --scrollbar: #3d3d47;
   --scrollbar-hover: #4d4d5a;
 }
@@ -34,10 +33,9 @@ html[data-theme="light"] {
   --text-faint: #8a8a95;
   --accent: #2f6fe0;
   --accent-soft: #2f6fe026;
-  --stage-bg: #e6e6ea;
-  --empty-glow: #2f6fe014;
   --stage-check-a: #dcdce2;
   --stage-check-b: #e6e6ea;
+  --empty-glow: #2f6fe014;
   --scrollbar: #c4c4cd;
   --scrollbar-hover: #adadb9;
 }
@@ -45,10 +43,10 @@ html[data-theme="light"] {
 :root {
   font-family: "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
-  /* Slideshow crossfade length. Keep in sync with `SLIDE_MS` in main.ts. */
-  --slide-ms: 520ms;
   color-scheme: dark light;
   -webkit-font-smoothing: antialiased;
+  /* Slideshow crossfade length. Keep in sync with `SLIDE_MS` in main.ts. */
+  --slide-ms: 520ms;
 }
 
 * {
@@ -85,17 +83,17 @@ body {
 /* ------------------------------- toolbar -------------------------------- */
 
 .toolbar {
-  justify-content: center;
   display: flex;
   align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
   gap: 6px;
   padding: 7px 10px;
   background: var(--bg-elev);
-  /* Anchors the "more" popover to the bar. */
-  position: relative;
   border-bottom: 1px solid var(--border);
   user-select: none;
+  /* Anchors the "more" popover to the bar. */
+  position: relative;
 }
 
 .tool-group {
@@ -106,7 +104,6 @@ body {
 
 .toolbar button,
 .toolbar select {
-  padding: 5px 10px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: var(--bg-elev-2);
@@ -114,6 +111,9 @@ body {
   font: inherit;
   font-size: 13px;
   line-height: 1.2;
+  cursor: pointer;
+}
+
 .toolbar button {
   display: inline-flex;
   align-items: center;
@@ -170,9 +170,6 @@ body {
   display: block;
 }
 
-  cursor: pointer;
-}
-
 .toolbar button:hover:not(:disabled),
 .toolbar select:hover {
   background: var(--bg-hover);
@@ -191,13 +188,13 @@ body {
 .toolbar button[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--accent-soft);
+  color: var(--text);
+}
+
 /* The "more" trigger reads as engaged while its popover is open. */
 .toolbar button[aria-expanded="true"] {
   border-color: var(--accent);
   background: var(--accent-soft);
-  color: var(--text);
-}
-
   color: var(--text);
 }
 
@@ -216,6 +213,9 @@ body {
   width: 1px;
   height: 20px;
   background: var(--border-strong);
+  margin: 0 4px;
+}
+
 /* ------------------------------ more menu ------------------------------- */
 
 .more-menu {
@@ -308,15 +308,15 @@ body {
   font-size: 12.5px;
 }
 
-  margin: 0 4px;
-}
-
 /* ------------------------------- workspace ------------------------------ */
 
 .workspace {
   flex: 1;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
 /* Pin each region to its own column. The side panels are hidden with the
    `hidden` attribute, which drops them from grid auto-placement — without
    explicit columns the stage would slide into the `auto` first column and
@@ -331,9 +331,6 @@ body {
 
 .info-panel {
   grid-column: 3;
-}
-
-  min-height: 0;
 }
 
 /* --------------------------- secondary bars ----------------------------- */
@@ -445,7 +442,6 @@ button.danger:hover:not(:disabled) {
     var(--stage-check-b) 0
   );
   background-size: 24px 24px;
-  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   cursor: grab;
 }
 
@@ -496,6 +492,10 @@ button.danger:hover:not(:disabled) {
   opacity: 0;
 }
 
+#viewer.visible {
+  opacity: 1;
+}
+
 /* Playback is the only place a frame is allowed to dissolve; a manual open
    still cuts, so navigation stays immediate. */
 .stage.slideshow #viewer {
@@ -533,18 +533,18 @@ button.danger:hover:not(:disabled) {
   transition: transform var(--slide-ms) ease-out;
 }
 
-#viewer.visible {
-  opacity: 1;
-}
-
-  flex-direction: column;
 .empty-hint {
   position: absolute;
-  gap: 10px;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
+  margin: 0;
+  padding: 32px;
+  text-align: center;
+  pointer-events: none;
   /* Ambient backdrop that stands in for the checkerboard while nothing is open:
      a soft pool of light over the stage floor. */
   background:
@@ -620,18 +620,13 @@ button.danger:hover:not(:disabled) {
   .empty-mark-rotor {
     animation: none;
   }
-  margin: 0;
-  padding: 32px;
-  text-align: center;
-  color: var(--text-faint);
-  pointer-events: none;
 }
-  z-index: 2;
 
 .toast {
   position: absolute;
   left: 50%;
   bottom: 18px;
+  z-index: 2;
   transform: translateX(-50%);
   max-width: 70%;
   padding: 8px 14px;
@@ -645,12 +640,12 @@ button.danger:hover:not(:disabled) {
 
 /* ------------------------------ thumbs sidebar -------------------------- */
 
-  contain: layout paint;
 .thumbs {
   width: 176px;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  contain: layout paint;
   background: var(--bg-elev);
   border-right: 1px solid var(--border);
 }
@@ -759,27 +754,27 @@ button.danger:hover:not(:disabled) {
 }
 
 .info-list {
-  padding: 8px 14px 16px;
   display: grid;
   grid-template-columns: minmax(56px, max-content) minmax(0, 1fr);
   align-content: start;
   gap: 0 14px;
   margin: 0;
+  padding: 8px 14px 16px;
   font-size: 12.5px;
 }
 
 .info-list dt {
   padding: 5px 0;
   color: var(--text-faint);
-  padding: 5px 0;
   white-space: nowrap;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 
 .info-list dd {
   margin: 0;
+  padding: 5px 0;
   overflow: hidden;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -920,6 +915,141 @@ body.is-fullscreen .statusbar {
 
 .modal-actions button:hover {
   background: var(--bg-hover);
+}
+
+/* ---------------------------- file association --------------------------- */
+
+/* Wider than the rename dialog: eight format rows plus a two-button footer. */
+.modal-card.modal-wide {
+  width: min(520px, 92vw);
+}
+
+/* Platform caveat. The left rule reads as an annotation rather than an error,
+   because on Windows and macOS this is a fact about the OS, not a failure. */
+.assoc-note {
+  margin: 0 0 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-elev-2);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-dim);
+}
+
+.assoc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 3px;
+  max-height: 44vh;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.assoc-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.assoc-row:hover {
+  background: var(--bg-elev-2);
+}
+
+.assoc-icon {
+  display: block;
+  width: 26px;
+  height: 26px;
+}
+
+.assoc-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.assoc-ext {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text);
+}
+
+.assoc-label {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hand-drawn checkbox: the UA control cannot follow the theme tokens. */
+.assoc-row input[type="checkbox"] {
+  position: relative;
+  appearance: none;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--bg-elev);
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.assoc-row input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.assoc-row input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.assoc-row input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* macOS: the rows stay as a preview of the icon set, but nothing is togglable. */
+.assoc-list.is-readonly .assoc-row {
+  cursor: default;
+}
+
+.assoc-list.is-readonly .assoc-row:hover {
+  background: none;
+}
+
+.assoc-row input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.assoc-row.is-pending .assoc-ext::after {
+  content: "·";
+  margin-left: 6px;
+  color: var(--accent);
 }
 
 /* ------------------------------- scrollbar ------------------------------ */

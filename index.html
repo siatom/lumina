@@ -186,6 +186,13 @@
         <line x1="12" x2="15" y1="14" y2="11" />
         <circle cx="12" cy="14" r="8" />
       </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+        <circle cx="12" cy="12" r="3" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="M20 6 9 17l-5-5" />
+      </symbol>
     </svg>
 
     <div id="app">
@@ -273,7 +280,6 @@
           >
             <svg class="icon"><use href="#i-crop" /></svg>
           </button>
-          <button id="btn-crop" title="进入 / 退出裁剪模式 (C)" disabled>裁剪</button>
         </div>
 
         <span class="divider"></span>
@@ -303,7 +309,16 @@
             <svg class="icon icon-base"><use href="#i-maximize" /></svg>
             <svg class="icon icon-alt"><use href="#i-minimize" /></svg>
           </button>
-          <button id="btn-copy-path" title="复制当前文件的完整路径" disabled>复制路径</button>
+          <button
+            id="btn-settings"
+            title="设置：文件关联 (Ctrl+,)"
+            aria-label="设置"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="assoc-modal"
+          >
+            <svg class="icon"><use href="#i-settings" /></svg>
+          </button>
         </div>
 
         <!-- Overflow popover for low-frequency file actions. Lives inside the
@@ -459,6 +474,34 @@
         <div class="modal-actions">
           <button id="btn-rename-cancel">取消</button>
           <button id="btn-rename-confirm" class="primary">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- File association. The format rows are built by main.ts from the backend's
+         `AssocStatus`, so the icon set and the platform's capability flags stay
+         in one place (Rust) rather than being duplicated in markup. -->
+    <div class="modal" id="assoc-modal" hidden>
+      <div
+        class="modal-card modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="assoc-title"
+      >
+        <h2 class="modal-title" id="assoc-title">文件关联</h2>
+        <p class="modal-sub">
+          让 Lumina 成为图片的默认打开方式，并为每种格式使用专属的文件图标。
+        </p>
+        <p class="assoc-note" id="assoc-note"></p>
+        <ul class="assoc-list" id="assoc-list"></ul>
+        <p class="modal-error" id="assoc-error" hidden></p>
+        <div class="modal-actions">
+          <button id="btn-assoc-all">全选</button>
+          <button id="btn-assoc-none">全不选</button>
+          <span class="spacer"></span>
+          <button id="btn-assoc-system" hidden>打开系统设置</button>
+          <button id="btn-assoc-close">关闭</button>
+          <button id="btn-assoc-apply" class="primary">应用</button>
         </div>
       </div>
     </div>

@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Lumina - a lightweight cross-platform image viewer"
 authors = ["DevTeam"]
 edition = "2024"
+# `src/bin/gen-file-icons.rs` adds a second binary, which makes a bare
+# `cargo run` ambiguous — and that is exactly what `tauri dev` runs. Name the
+# app binary so the dev/build path stays `cargo run` with no extra flags.
+default-run = "lumina"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,6 +17,21 @@ edition = "2024"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "lumina_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Gates the icon-generation dev tool. Without this the tool would be part of
+# every `cargo build`, including the release profile — where `lto = true` and
+# `codegen-units = 1` would make it a second full LTO link for no reason, and
+# would leave a stray binary beside the app in the bundle.
+tools = []
+
+# The icon generator is a development tool, not part of the app. `required-features`
+# keeps it out of the default build graph; run it with:
+#     cargo run --bin gen-file-icons --features tools
+[[bin]]
+name = "gen-file-icons"
+path = "src/bin/gen-file-icons.rs"
+required-features = ["tools"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -60,6 +79,14 @@ lru = "0.12"
 # API through Rust bindings (FSEvents / inotify / ReadDirectoryChangesW), so
 # there is no C toolchain to build — only the OS frameworks already present.
 notify = "8.2.0"
+
+# File association (Windows only). `winreg` is pure Rust over `windows-sys` FFI
+# -- no C toolchain -- but it `compile_error!`s on non-Windows targets, so it
+# must be a target-specific dependency. Both crates are already in Cargo.lock as
+# transitive dependencies, so this promotes them rather than growing the tree.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

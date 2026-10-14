@@ -2247,6 +2247,8 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tiff",
+ "windows-sys 0.61.2",
+ "winreg",
 ]
 
 [[package]]

@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Generate Lumina's per-format file icons as SVG.
+
+    python3 scripts/make-file-icons.py
+
+Design system
+-------------
+* **Board** — a 1024x1024 squircle (rx = 0.219 * side), same gradient and hairline
+  border as `assets/icon.svg`, so a Lumina file icon reads as a Lumina artifact.
+* **Halo** — a soft radial pool of the format's accent colour. It is the "光" of
+  the brand, and it is what makes the icons distinguishable at 16 px, where the
+  letterforms have long since dissolved into pixels.
+* **Wordmark** — the format abbreviation in the accent colour, drawn as *stroke
+  paths*, never `<text>`.
+
+Why paths and not text
+----------------------
+A `<text>` element resolves against whatever fonts the rasterising machine
+happens to have, so `cargo run --bin gen-file-icons` would produce different
+`.ico` bytes on different machines -- and the icon the settings panel previews
+in the webview would not match the one Windows shows in Explorer. Stroke paths
+are font-independent and byte-identical everywhere.
+
+Glyph grid
+----------
+Every letter is authored in the same 200 x 340 box (x in 0..200, y in -340..0)
+and stroked at 66 units with round caps and joins, mirroring the Lucide-style
+stroke language the rest of the UI already speaks.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+# --------------------------------------------------------------------------- #
+# Glyphs — one path per letter, all on the shared 200 x 340 grid.
+# --------------------------------------------------------------------------- #
+
+LETTERS: dict[str, str] = {
+    # Vertical stem + one bowl (bowl spans the upper half, r = 85).
+    "P": "M0 0V-340H96A85 85 0 0 1 96-170H0",
+    # Two stems joined by a full-height diagonal.
+    "N": "M0 0V-340L200 0V-340",
+    # Full-height ellipse with a gap on the right, closed by a bar.
+    "G": "M157.4 -309.3A100 170 0 1 0 200 -170V-95H124",
+    # Stem on the right, hook sweeping left along the baseline.
+    "J": "M150 -340V-95A75 75 0 0 1 0 -95",
+    # A bare stem: narrow by nature, laid out with a narrow advance.
+    "I": "M100 -340V0",
+    # Stem + top arm + mid bar.
+    "F": "M0 0V-340H190M0 -190H150",
+    # Stem + two stacked bowls (r = 85 each).
+    "B": "M0 0V-340H92A85 85 0 0 1 92-170H0M0 -170H100A85 85 0 0 1 100 0H0",
+    # Two stems joined by a deep V.
+    "M": "M0 0V-340L100 -120L200 -340V0",
+    # Ellipse open on the right (a G without the bar).
+    "C": "M157.4 -309.3A100 170 0 1 0 157.4 -30.7",
+    # Closed ellipse.
+    "O": "M100 -340A100 170 0 1 1 100 0A100 170 0 1 1 100 -340",
+    # Four strokes, two valleys.
+    "W": "M0 -340L50 0L100 -190L150 0L200 -340",
+    # Stem + three arms.
+    "E": "M0 0V-340H180M0 -190H150M0 0H180",
+    # Top bar + centred stem.
+    "T": "M0 -340H200M100 -340V0",
+    # Two opposing bowls joined at the waist.
+    "S": "M186 -282C186 -324 146 -340 100 -340C54 -340 14 -320 14 -272"
+         "C14 -222 56 -212 100 -204C144 -196 186 -186 186 -136"
+         "C186 -86 146 -68 100 -68C54 -68 14 -86 14 -128",
+    # Two diagonals meeting at the baseline.
+    "V": "M0 -340L100 0L200 -340",
+}
+
+# Ink extent of each glyph, in grid units. Stroke half-width is 33 and round
+# caps add another 33 past every stroke end, so a stem sitting on x = 0 actually
+# inks from x = -33. Laying the wordmarks out from these numbers (rather than
+# from a per-letter advance) is what gives every pair of neighbours the same
+# *optical* gap -- which is why "GIF" reads as three letters and not "GF".
+INK: dict[str, tuple[int, int]] = {
+    "P": (-33, 214), "N": (-33, 233), "G": (-33, 233), "J": (-33, 183),
+    "I": (67, 133), "F": (-33, 223), "B": (-33, 218), "M": (-33, 233),
+    "C": (-33, 233), "O": (-33, 233), "W": (-33, 233), "E": (-33, 213),
+    "T": (-33, 233), "S": (-19, 219), "V": (-33, 233),
+}
+
+# Optical gap between neighbouring glyph inks.
+GAP = 46
+# Uniform type scale. The widest wordmark ("WEBP", 1148 grid units) then spans
+# ~82% of the board; every word is set at the same type size and simply centred.
+SCALE = 0.73
+
+BOARD = 1024
+# Grid-space width of the board once SCALE is applied.
+GRID_BOARD = BOARD / SCALE
+# Baseline that vertically centres the 340-unit cap box.
+BASELINE_Y = (GRID_BOARD + 340) / 2
+
+# --------------------------------------------------------------------------- #
+# Formats — 10 extensions collapsed onto 8 wordmarks.
+# --------------------------------------------------------------------------- #
+
+# key -> (wordmark, accent colour, Chinese label)
+FORMATS: list[tuple[str, str, str, str]] = [
+    ("png",  "PNG",  "#4C9AFF", "PNG 图像"),
+    ("jpg",  "JPG",  "#FF9A3D", "JPEG 图像"),
+    ("gif",  "GIF",  "#FF5C8A", "GIF 图像"),
+    ("webp", "WEBP", "#2ED3A0", "WebP 图像"),
+    ("bmp",  "BMP",  "#A78BFA", "BMP 图像"),
+    ("tiff", "TIFF", "#8FA3BF", "TIFF 图像"),
+    ("ico",  "ICO",  "#F5C542", "图标文件"),
+    ("svg",  "SVG",  "#29D0E8", "矢量图"),
+]
+
+TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Lumina file icon — {word} ({label}).
+
+  GENERATED by scripts/make-file-icons.py. Edit that script, not this file.
+  (No double hyphen anywhere below: that is illegal inside an XML comment.)
+
+  Board: 1024 squircle, rx = 0.219 * 1024, gradient #0E1420 to #1C2637.
+  Wordmark: "{word}" as stroke paths on a 200x340 grid, stroke 66,
+  round caps/joins. Deliberately no <text>: see the script docstring.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="board" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0E1420"/>
+      <stop offset="1" stop-color="#1C2637"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="{accent}" stop-opacity="0.30"/>
+      <stop offset="0.55" stop-color="{accent}" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="{accent}" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#board)"/>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="222.5"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="3"/>
+
+  <circle cx="512" cy="512" r="430" fill="url(#halo)"/>
+
+  <g fill="none" stroke="{accent}" stroke-width="66" stroke-linecap="round"
+     stroke-linejoin="round" transform="translate(0 {baseline}) scale({scale})">
+{paths}
+  </g>
+</svg>
+"""
+
+
+def layout(word: str) -> list[tuple[float, str]]:
+    """Place `word` on the board: a list of (translate-x, letter) pairs, centred.
+
+    Each x is the glyph origin, already shifted so that the glyph's *left ink*
+    lands exactly on the running cursor -- see `INK`.
+    """
+    width = sum(INK[c][1] - INK[c][0] for c in word) + GAP * (len(word) - 1)
+    cursor = (GRID_BOARD - width) / 2
+    placed: list[tuple[float, str]] = []
+    for c in word:
+        left, right = INK[c]
+        placed.append((cursor - left, c))
+        cursor += right - left + GAP
+    return placed
+
+
+def fmt(value: float) -> str:
+    """Trim a float to a tidy SVG number."""
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def render(key: str, word: str, accent: str, label: str) -> str:
+    paths = "\n".join(
+        f'    <path transform="translate({fmt(x)} 0)" d="{LETTERS[c]}"/>'
+        for x, c in layout(word)
+    )
+    return TEMPLATE.format(
+        word=word, accent=accent, label=label, paths=paths,
+        baseline=fmt(BASELINE_Y), scale=fmt(SCALE),
+    )
+
+
+def main() -> None:
+    out = pathlib.Path(__file__).resolve().parent.parent / "assets" / "file-icons"
+    out.mkdir(parents=True, exist_ok=True)
+    for key, word, accent, label in FORMATS:
+        (out / f"{key}.svg").write_text(render(key, word, accent, label), encoding="utf-8")
+        print(f"wrote {out / f'{key}.svg'}")
+
+
+if __name__ == "__main__":
+    main()

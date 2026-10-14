@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, State};
 
+use crate::file_assoc::{self, AssocStatus};
 use crate::imaging::{self, DirectoryListing, ImageMetadata, TransformSpec};
 use crate::protocol;
 use crate::watcher::WatcherState;
@@ -146,4 +147,38 @@ pub fn unwatch_directory(watcher: State<'_, WatcherState>) -> Result<(), String>
 #[tauri::command]
 pub fn get_protocol_base() -> String {
     protocol::protocol_base()
+}
+
+/* --------------------------- file association ---------------------------- */
+
+/// Current operating-system association state for every format Lumina opens.
+///
+/// Also carries the platform's capability flags and a ready-to-show note, so
+/// the settings panel never has to hard-code what Windows/macOS/Linux allow.
+#[tauri::command(async)]
+pub fn get_association_status() -> Result<AssocStatus, String> {
+    Ok(file_assoc::status())
+}
+
+/// Register or withdraw Lumina as a handler for `exts`.
+///
+/// `exts` is the exact set to change rather than the desired end state: the
+/// settings panel sends only the rows the user actually toggled. Returns the
+/// refreshed status so the panel does not need a second round-trip.
+#[tauri::command(async)]
+pub fn set_file_association(
+    app: AppHandle,
+    exts: Vec<String>,
+    enabled: bool,
+) -> Result<AssocStatus, String> {
+    file_assoc::set_enabled(&app, &exts, enabled).map_err(|e| e.to_string())
+}
+
+/// Open the operating system's "default apps" page.
+///
+/// Windows-only: it is the one place the user can confirm Lumina as the default
+/// handler, which Windows 10/11 will not let an application do on its own.
+#[tauri::command]
+pub fn open_default_apps_settings() -> Result<(), String> {
+    file_assoc::open_default_apps_settings().map_err(|e| e.to_string())
 }

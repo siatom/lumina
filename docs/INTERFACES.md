@@ -339,6 +339,43 @@ function onDirectoryChanged(handler: (dir: string) => void): Promise<UnlistenFn>
 
 > 修改检测依赖 `modified_ms` 与 `file_size` 两个字段（见 §4.1），后端 `ImageEntry` 必须持续提供它们。
 
+### 4.13 文件关联（`get_association_status` / `set_file_association` / `open_default_apps_settings`）
+
+让 Lumina 成为图片的默认打开方式，并在 Windows 上为**每种格式挂一个专属文件图标**。详见 §10。
+
+```ts
+function getAssociationStatus(): Promise<AssocStatus>;
+function setFileAssociation(exts: string[], enabled: boolean): Promise<AssocStatus>;
+function openDefaultAppsSettings(): Promise<void>;   // 仅 Windows
+```
+
+```ts
+interface AssocFormat {
+  key: string;          // 图标标识，同时是资源文件名 <key>.ico
+  label: string;        // 面板显示名，如 "PNG 图像"
+  ext: string[];        // 该格式覆盖的扩展名，如 ["jpg", "jpeg"]
+  associated: boolean;  // 系统当前是否用 Lumina 打开
+}
+
+interface AssocStatus {
+  platform: string;                  // "windows" | "macos" | "linux"
+  supports_per_format_icons: boolean; // 能否按格式换图标（仅 Windows）
+  can_associate: boolean;             // 能否自行注册（macOS 为 false）
+  can_set_default: boolean;           // 能否静默设为默认（Windows/macOS 为 false）
+  formats: AssocFormat[];
+  note: string;                       // 平台说明，前端原样展示
+}
+```
+
+**契约要点**
+
+- `setFileAssociation` 传的是**要变更的那部分扩展名**，不是期望的终态。前端只提交用户真正改动过的行，避免重写无关行（也就避免了对它们重跑 `SHChangeNotify`）。返回值是刷新后的 `AssocStatus`，前端无需二次请求。
+- 不在 `AssocStatus.formats` 里的扩展名会被**静默忽略**而非报错——UI 只可能提交受支持的扩展名，为个别脏值让整批失败不划算。
+- **`can_set_default` 在 Windows 与 macOS 上恒为 `false`**，这是操作系统设计而非未实现：Windows 8 起默认程序存在 `FileExts\.<ext>\UserChoice`，带 hash 保护，程序无法合法写入；macOS 需 Launch Services C API 且系统未提供命令行工具。**UI 文案不得承诺「一键设为默认」**，只能引导用户去系统设置里确认一次。
+- `can_associate` 在 macOS 上为 `false`：macOS 的关联来自 bundle 的 `Info.plist`，构建期固定，运行时改写会破坏代码签名。面板在此时**只读展示**图标集，不提供开关。
+- `open_default_apps_settings` 仅 Windows 可用（`ms-settings:defaultapps`），其余平台返回 `Err`。
+- 应用内快捷键 `Ctrl+,`；`Esc` 关闭、`Enter` 应用。
+
 ---
 
 ## 5. 文件对话框
@@ -531,3 +568,92 @@ src-tauri> cargo test --all-targets                   # 全量（23 项）
 - **安全网**：`viewer` 的 `load` 事件里用 `naturalWidth/naturalHeight` 校正 `meta` 并 `reflow()`，覆盖「EXIF 缺失但引擎仍旋转」或「后端已把方向烘进像素」（TIFF 转码、取帧）的情况；两者一致时是 no-op，无跳变。
 
 > 注意：`getImageMetadata` 的 `width/height` 语义仍是**存储尺寸**（后端契约不变），显示尺寸的推导由前端按 `exif.orientation` 完成。
+
+---
+
+## 10. 文件关联与每格式文件图标
+
+> 命令签名见 §4.13。实现见 `src-tauri/src/file_assoc/`，图标源见 `assets/file-icons/`。
+
+### 10.1 各平台能力（先说清楚能承诺什么）
+
+| 能力 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 出现在「打开方式」 | ✅ | ✅（构建期声明） | ✅ |
+| 程序自行注册关联 | ✅（写 HKCU） | ❌ | ✅（写 `.desktop`） |
+| 静默设为默认 | ❌ | ❌ | ✅（`xdg-mime`） |
+| 按扩展名自定义文件图标 | ✅ | ❌ | ❌ |
+
+`AssocStatus` 的 `supports_per_format_icons` / `can_associate` / `can_set_default` 三个标志就是这张表，前端据此决定面板是否可交互、要不要显示「打开系统设置」。
+
+### 10.2 Windows：注册表布局
+
+**全部写在 `HKCU`**（`HKEY_CURRENT_USER\Software\Classes`，即用户级 `HKEY_CLASSES_ROOT` 视图），因此**不需要管理员权限**，且优先级高于 `HKLM`。
+
+| 位置 | 内容 | 作用 |
+| --- | --- | --- |
+| `Software\Classes\Lumina.<ext>` | `(Default)` = 友好名 | **每个扩展名一个独立 ProgID** |
+| `…\Lumina.<ext>\DefaultIcon` | `"<图标>.ico",0` | 该格式在资源管理器里的图标 |
+| `…\Lumina.<ext>\shell\open\command` | `"<exe>" "%1"` | 打开命令 |
+| `Software\Classes\.<ext>\OpenWithProgids` | 值名 `Lumina.<ext>` | 进入「打开方式」候选，**不改默认** |
+| `Software\Classes\.<ext>` | `(Default)` = `Lumina.<ext>` | 请求设为默认（见下方限制） |
+| `Software\Classes\Applications\Lumina.exe` | `FriendlyAppName`、`SupportedTypes\<ext>`、`shell\open\command` | 让 shell 以「应用程序」身份识别本 exe |
+| `Software\RegisteredApplications` | `Lumina` = `Software\Lumina\Capabilities` | 让 Lumina 出现在「设置 → 应用 → 默认应用」 |
+| `Software\Lumina\Capabilities` | `ApplicationName`、`ApplicationDescription`、`ApplicationIcon`、`FileAssociations\<ext>` | 上一条指向的能力清单 |
+
+**为什么必须每个扩展名一个 ProgID**：shell 解析文件图标的路径是 `.<ext> → ProgID → ProgID\DefaultIcon`，`DefaultIcon` **只在 ProgID 下查找**。共用一个 ProgID 就只能共用一张图标；在扩展名键下另写 `DefaultIcon` 是无效的。VS Code / Adobe 用的就是这个做法。
+
+**`%1` 与 exe 路径都必须加引号**，否则 `C:\Program Files\...` 或 `my photo.png` 会被拆成多个参数，打开静默失败。
+
+**为什么不能静默设为默认**：Windows 8 起，用户实际选择的默认程序存在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.<ext>\UserChoice`，该键带 `Hash` 值并受系统保护，微软有意阻止程序直接写入。所以写扩展名 `(Default)` 只是**声明候选**，用户仍需在「默认应用」里确认一次。
+
+**撤销时删什么**：只删自己的 ProgID、`Applications\Lumina.exe`、`Software\Lumina`、`RegisteredApplications` 值，以及 `OpenWithProgids` 里自己的值名。**不删**扩展名键的 `(Default)`——微软明确要求卸载程序不要清它（ProgID 注销后 shell 会自动忽略，清掉反而可能破坏用户后来设置的默认程序）。写入前会把原值备份到 `Lumina_backup`，撤销时原样还原。
+
+**写入后必须调 `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, null, null)`**：不调用的话图标与关联可能直到重启（或重启 `explorer.exe`）才生效，资源管理器的图标缓存很顽固。
+
+### 10.3 图标设计
+
+单一设计源 `assets/file-icons/*.svg`（1024×1024，手写 SVG），两种产物：
+
+- **`.ico`**（Windows 用）：`cd src-tauri && cargo run --bin gen-file-icons` → `src-tauri/icons/file-icons/<key>.ico`，含 16/24/32/48/64/256 六个尺寸。缺尺寸会让资源管理器在对应视图下放大邻近尺寸，图标就糊了。产物已提交入库，随 `bundle.resources` 打包。
+- **SVG**（应用内预览用）：`src/main.ts` 直接 import，Vite 出 URL。设置面板里的预览与 Explorer 里看到的来自同一份设计。
+
+造型：沿用应用图标 `assets/icon.svg` 的深蓝 squircle 底板与渐变（`#0E1420 → #1C2637`），中央是**格式强调色**的字形缩写；底板外加一圈该格式色的柔光晕——它是品牌里「光」的延续，也是 16px 下唯一还分辨得出的信息（字形此时已糊成色块）。
+
+10 个扩展名归为 8 个字形（`jpg`/`jpeg` 共用一个、`tif`/`tiff` 共用一个），但**各自有独立 ProgID**，所以仍能按扩展名分别处理：
+
+| ext | key | 强调色 |
+| --- | --- | --- |
+| `png` | png | `#4C9AFF` |
+| `jpg` `jpeg` | jpg | `#FF9A3D` |
+| `gif` | gif | `#FF5C8A` |
+| `webp` | webp | `#2ED3A0` |
+| `bmp` | bmp | `#A78BFA` |
+| `tif` `tiff` | tiff | `#8FA3BF` |
+| `ico` | ico | `#F5C542` |
+| `svg` | svg | `#29D0E8` |
+
+**字形是描边路径，不是 `<text>`**。用 `<text>` 会让栅格化结果依赖本机字体——换台机器生成的 `.ico` 字节不同，且应用内预览（webview 用系统字体）与 `.ico` 会不一致。字形画在统一的 200×340 网格上，按**墨迹宽度**（含描边半宽 33 与圆头帽 33）排版，因此相邻字母的光学间距一致（否则 `GIF` 里的 `I` 会被两侧字母吃掉，看起来像 `GF`）。重生成：`python3 scripts/make-file-icons.py`。
+
+### 10.4 目录结构与验证边界
+
+```
+assets/file-icons/*.svg             设计源（手写）
+scripts/make-file-icons.py          生成上述 SVG（可复现）
+src-tauri/src/bin/gen-file-icons.rs SVG → 多尺寸 .ico
+src-tauri/icons/file-icons/*.ico    产物，随 bundle.resources 打包
+src-tauri/src/file_assoc/
+  mod.rs          门面：格式表 / AssocStatus / 平台分发
+  plan.rs         注册表布局的纯函数 + 单测（跨平台可跑）
+  windows.rs      winreg 执行 + SHChangeNotify
+  macos.rs        说明为何不可行
+  linux.rs        .desktop + xdg-mime
+```
+
+**`plan.rs` 是关键的架构选择**：「要写哪些键值」被下沉为纯数据，`windows.rs` 只负责执行。这样风险最高的部分在**任何平台**都能被单测覆盖，包括开发机是 macOS 的情况。
+
+本机能验证：`plan.rs` 的全部断言（ProgID 命名、引号、备份、撤销范围）、格式表完整性、图标存在性、ICO 文件头结构、设置面板 UI。
+
+**必须到 Windows 11 验证**：注册表实际落盘、在「打开方式」/「默认应用」中的可见性、`SHChangeNotify` 的即时性、资源管理器各视图尺寸下的图标观感、卸载后是否能还原用户原有默认程序。
+
+> 一个已知的未验证点：`image` 0.25 的 `IcoFrame` 只提供 `as_png`，所以六个尺寸**都是 PNG 帧**。微软的惯例是小尺寸用 BMP DIB、仅 256 用 PNG。若 Windows 实测 16/24px 观感不佳，回退方案是改用手写 BMP DIB 帧容器（`gen-file-icons.rs` 里换掉 `IcoFrame::with_encoded` 的数据即可，ICO 布局不变）。

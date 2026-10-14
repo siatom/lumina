@@ -413,6 +413,70 @@ export async function onDirectoryChanged(
 }
 
 /* -------------------------------------------------------------------------- */
+/* File association                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** One image format family: its extensions, its wordmark and its current state. */
+export interface AssocFormat {
+  /** Icon key — also the `<key>.ico` file name among the bundle's resources. */
+  key: string;
+  label: string;
+  /** Every extension in this family, e.g. `["jpg", "jpeg"]`. */
+  ext: string[];
+  /** True when the OS currently opens these with Lumina. */
+  associated: boolean;
+}
+
+/**
+ * Association state plus the platform's capability flags.
+ *
+ * The panel must word itself from these rather than assume: Windows will not
+ * let an application become the default silently (the user confirms once in
+ * Settings), and macOS cannot be associated from a running app at all.
+ */
+export interface AssocStatus {
+  /** `std::env::consts::OS`: "windows" | "macos" | "linux". */
+  platform: string;
+  /** Whether each format can carry its own file icon (Windows only). */
+  supports_per_format_icons: boolean;
+  /** Whether Lumina can register itself at all. */
+  can_associate: boolean;
+  /** Whether Lumina can become the default without the user confirming elsewhere. */
+  can_set_default: boolean;
+  formats: AssocFormat[];
+  /** Platform-specific explanation, shown verbatim in the panel. */
+  note: string;
+}
+
+/** Current association state for every format Lumina can open. */
+export function getAssociationStatus(): Promise<AssocStatus> {
+  return invoke<AssocStatus>("get_association_status");
+}
+
+/**
+ * Register or withdraw Lumina for exactly `exts`.
+ *
+ * This is the set to *change*, not the desired end state — send only the rows
+ * the user actually toggled. Returns the refreshed status.
+ */
+export function setFileAssociation(
+  exts: string[],
+  enabled: boolean,
+): Promise<AssocStatus> {
+  return invoke<AssocStatus>("set_file_association", { exts, enabled });
+}
+
+/**
+ * Open the operating system's "default apps" page.
+ *
+ * Windows only: it is the one place the user can confirm Lumina as the default
+ * handler, which Windows 10/11 will not let an application do on its own.
+ */
+export function openDefaultAppsSettings(): Promise<void> {
+  return invoke<void>("open_default_apps_settings");
+}
+
+/* -------------------------------------------------------------------------- */
 /* Native drag & drop                                                          */
 /* -------------------------------------------------------------------------- */
 
