@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,34 +10,94 @@
 
   <body>
     <div id="app">
-      <header class="toolbar">
-        <button id="btn-open" title="打开图片 (Ctrl+O)">打开</button>
+      <header class="toolbar" id="toolbar">
+        <div class="tool-group">
+          <button id="btn-open" title="打开图片 (Ctrl+O)">打开图片</button>
+          <button id="btn-open-folder" title="打开文件夹，浏览其中所有图片">打开文件夹</button>
+        </div>
+
         <span class="divider"></span>
-        <button id="btn-prev" title="上一张 (←)">‹ 上一张</button>
-        <button id="btn-next" title="下一张 (→)">下一张 ›</button>
+
+        <div class="tool-group">
+          <button id="btn-prev" title="上一张 (↑ / ← / PageUp)" disabled>上一张</button>
+          <button id="btn-next" title="下一张 (↓ / → / PageDown)" disabled>下一张</button>
+        </div>
+
         <span class="divider"></span>
-        <button id="btn-zoom-out" title="缩小 (-)">−</button>
-        <span id="zoom-label" class="zoom-label">100%</span>
-        <button id="btn-zoom-in" title="放大 (+)">+</button>
-        <button id="btn-fit" title="适应窗口 (0)">适应</button>
-        <button id="btn-actual" title="原始大小 (1)">1:1</button>
+
+        <div class="tool-group">
+          <button id="btn-zoom-out" title="缩小 (-)">−</button>
+          <button id="zoom-label" class="zoom-label" title="点击恢复适应窗口 (F)" disabled>100%</button>
+          <button id="btn-zoom-in" title="放大 (+)">+</button>
+          <button id="btn-fit" title="适应窗口 (F)">适应</button>
+          <button id="btn-actual" title="原始大小 1:1 (1)">1:1</button>
+        </div>
+
+        <span class="divider"></span>
+
+        <div class="tool-group">
+          <button id="btn-rotate-left" title="向左旋转 90° (L / Shift+R)">↺</button>
+          <button id="btn-rotate-right" title="向右旋转 90° (R)">↻</button>
+          <button id="btn-flip-h" title="水平翻转 (H)">⇋</button>
+          <button id="btn-flip-v" title="垂直翻转 (V)">⇅</button>
+          <button id="btn-reset-transform" title="重置旋转/翻转 (Shift+0)">重置</button>
+        </div>
+
+        <span class="divider"></span>
+
+        <div class="tool-group">
+          <button id="btn-slideshow" title="播放 / 暂停幻灯片 (空格)">▶ 幻灯片</button>
+          <label class="field" title="幻灯片切换间隔">
+            <select id="slideshow-interval">
+              <option value="2">2 秒</option>
+              <option value="3" selected>3 秒</option>
+              <option value="5">5 秒</option>
+              <option value="10">10 秒</option>
+            </select>
+          </label>
+        </div>
+
         <span class="spacer"></span>
-        <span id="file-label" class="file-label"></span>
-        <button id="btn-info" title="显示/隐藏信息 (i)">信息</button>
+
+        <div class="tool-group">
+          <button id="btn-thumbs" title="显示 / 隐藏缩略图侧栏 (T)" aria-pressed="true">缩略图</button>
+          <button id="btn-info" title="显示 / 隐藏信息面板 (I)" aria-pressed="false">信息</button>
+          <button id="btn-theme" title="切换深色 / 浅色主题">主题</button>
+          <button id="btn-fullscreen" title="全屏 (F11)">全屏</button>
+        </div>
       </header>
 
-      <main class="stage" id="stage">
-        <img id="viewer" alt="" draggable="false" />
-        <p class="empty-hint" id="empty-hint">打开一张图片开始浏览</p>
-      </main>
+      <div class="workspace">
+        <aside class="thumbs" id="thumbs">
+          <div class="thumbs-head">
+            <span class="thumbs-title">当前目录</span>
+            <span class="thumbs-count" id="thumbs-count"></span>
+          </div>
+          <div class="thumbs-track" id="thumbs-track"></div>
+        </aside>
 
-      <aside class="info-panel" id="info-panel" hidden>
-        <h2 class="info-title">图片信息</h2>
-        <dl class="info-list" id="info-list"></dl>
-      </aside>
+        <main class="stage" id="stage">
+          <img id="viewer" alt="" draggable="false" />
+          <p class="empty-hint" id="empty-hint">打开一张图片开始浏览</p>
+          <div class="toast" id="toast" hidden></div>
+        </main>
 
-      <footer class="filmstrip">
-        <div class="filmstrip-track" id="filmstrip"></div>
+        <aside class="info-panel" id="info-panel" hidden>
+          <h2 class="info-title">图片信息</h2>
+          <dl class="info-list" id="info-list"></dl>
+        </aside>
+      </div>
+
+      <footer class="statusbar">
+        <span class="status-item file" id="status-file" title="">未打开</span>
+        <span class="status-sep"></span>
+        <span class="status-item" id="status-dims">—</span>
+        <span class="status-sep"></span>
+        <span class="status-item" id="status-format">—</span>
+        <span class="status-sep"></span>
+        <span class="status-item" id="status-index">—</span>
+        <span class="spacer"></span>
+        <span class="status-item" id="status-zoom">100%</span>
       </footer>
     </div>
   </body>

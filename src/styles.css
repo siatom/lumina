@@ -1,14 +1,59 @@
+/* ==========================================================================
+   Lumina — viewer UI theme & layout
+   ========================================================================== */
+
+html[data-theme="dark"] {
+  --bg: #1b1b1f;
+  --bg-elev: #232329;
+  --bg-elev-2: #2c2c34;
+  --bg-hover: #383843;
+  --border: #33333c;
+  --border-strong: #3a3a45;
+  --text: #e8e8ea;
+  --text-dim: #9a9aa6;
+  --text-faint: #6c6c7a;
+  --accent: #4c8dff;
+  --accent-soft: #4c8dff33;
+  --stage-bg: #131316;
+  --stage-check-a: #1a1a1e;
+  --stage-check-b: #131316;
+  --scrollbar: #3d3d47;
+  --scrollbar-hover: #4d4d5a;
+}
+
+html[data-theme="light"] {
+  --bg: #f4f4f6;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #ececf0;
+  --bg-hover: #e2e2e8;
+  --border: #d9d9df;
+  --border-strong: #c6c6cf;
+  --text: #1c1c22;
+  --text-dim: #55555f;
+  --text-faint: #8a8a95;
+  --accent: #2f6fe0;
+  --accent-soft: #2f6fe026;
+  --stage-bg: #e6e6ea;
+  --stage-check-a: #dcdce2;
+  --stage-check-b: #e6e6ea;
+  --scrollbar: #c4c4cd;
+  --scrollbar-hover: #adadb9;
+}
+
 :root {
   font-family: "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
-  color: #e8e8ea;
-  background-color: #1b1b1f;
-  color-scheme: dark;
+  color-scheme: dark light;
   -webkit-font-smoothing: antialiased;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Author `display` rules would otherwise beat the UA `[hidden]` rule. */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -18,43 +63,61 @@ body {
   overflow: hidden;
 }
 
+body {
+  color: var(--text);
+  background-color: var(--bg);
+}
+
 #app {
   display: grid;
-  grid-template-columns: 1fr auto;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "toolbar toolbar"
-    "stage info"
-    "filmstrip filmstrip";
   height: 100vh;
+}
+
+.spacer {
+  flex: 1;
 }
 
 /* ------------------------------- toolbar -------------------------------- */
 
 .toolbar {
-  grid-area: toolbar;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 10px;
-  background: #232329;
-  border-bottom: 1px solid #33333c;
+  padding: 7px 10px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
   user-select: none;
 }
 
-.toolbar button {
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar button,
+.toolbar select {
   padding: 5px 10px;
-  border: 1px solid #3a3a45;
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
-  background: #2c2c34;
+  background: var(--bg-elev-2);
   color: inherit;
+  font: inherit;
   font-size: 13px;
+  line-height: 1.2;
   cursor: pointer;
 }
 
-.toolbar button:hover:not(:disabled) {
-  background: #383843;
-  border-color: #4a4a58;
+.toolbar button:hover:not(:disabled),
+.toolbar select:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.toolbar button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .toolbar button:disabled {
@@ -62,45 +125,50 @@ body {
   cursor: default;
 }
 
+.toolbar button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.toolbar .zoom-label {
+  min-width: 58px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.toolbar .field {
+  display: inline-flex;
+}
+
 .divider {
   width: 1px;
   height: 20px;
-  background: #3a3a45;
+  background: var(--border-strong);
   margin: 0 4px;
 }
 
-.spacer {
-  flex: 1;
+/* ------------------------------- workspace ------------------------------ */
+
+.workspace {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 0;
 }
 
-.zoom-label {
-  min-width: 52px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-  color: #b9b9c4;
-}
-
-.file-label {
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #9a9aa6;
-  margin-right: 8px;
-}
-
-/* -------------------------------- stage --------------------------------- */
+/* ------------------------------ stage ----------------------------------- */
 
 .stage {
-  grid-area: stage;
   position: relative;
+  min-width: 0;
   overflow: hidden;
-  background: #131316;
+  background-color: var(--stage-bg);
   background-image:
-    linear-gradient(45deg, #1a1a1e 25%, transparent 25%),
-    linear-gradient(-45deg, #1a1a1e 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #1a1a1e 75%),
-    linear-gradient(-45deg, transparent 75%, #1a1a1e 75%);
+    linear-gradient(45deg, var(--stage-check-a) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--stage-check-a) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--stage-check-a) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--stage-check-a) 75%);
   background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   cursor: grab;
@@ -116,8 +184,10 @@ body {
   left: 0;
   max-width: none;
   transform-origin: 0 0;
+  will-change: transform;
   user-select: none;
   -webkit-user-drag: none;
+  image-rendering: auto;
   opacity: 0;
 }
 
@@ -134,76 +204,67 @@ body {
   margin: 0;
   padding: 24px;
   text-align: center;
-  color: #6c6c7a;
+  color: var(--text-faint);
   pointer-events: none;
 }
 
-/* ------------------------------ info panel ------------------------------ */
-
-.info-panel {
-  grid-area: info;
-  width: 300px;
-  overflow-y: auto;
-  padding: 12px 14px;
-  background: #232329;
-  border-left: 1px solid #33333c;
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  max-width: 70%;
+  padding: 8px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--text);
+  box-shadow: 0 6px 20px #0006;
+  font-size: 13px;
 }
 
-.info-title {
-  margin: 0 0 10px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #d6d6de;
+/* ------------------------------ thumbs sidebar -------------------------- */
+
+.thumbs {
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
 }
 
-.info-list {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 6px 12px;
-  margin: 0;
-  font-size: 12.5px;
-}
-
-.info-list dt {
-  color: #8a8a98;
-  white-space: nowrap;
-}
-
-.info-list dd {
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #e2e2ea;
-}
-
-/* ------------------------------ filmstrip ------------------------------- */
-
-.filmstrip {
-  grid-area: filmstrip;
-  height: 92px;
-  background: #202026;
-  border-top: 1px solid #33333c;
-}
-
-.filmstrip-track {
+.thumbs-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.thumbs-track {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
-  height: 100%;
-  padding: 8px 10px;
-  overflow-x: auto;
-  overflow-y: hidden;
 }
 
 .thumb {
+  position: relative;
   flex: 0 0 auto;
-  width: 68px;
-  height: 68px;
+  width: 100%;
+  height: 108px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 6px;
-  background: #2c2c34;
+  background: var(--bg-elev-2);
   overflow: hidden;
   cursor: pointer;
 }
@@ -216,15 +277,118 @@ body {
 }
 
 .thumb:hover {
-  border-color: #5a5a6a;
+  border-color: var(--border-strong);
 }
 
 .thumb.active {
-  border-color: #4c8dff;
+  border-color: var(--accent);
 }
 
 .thumb-failed {
   opacity: 0.25;
+}
+
+.thumb .thumb-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: #fff;
+  background: linear-gradient(transparent, #000a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ------------------------------ info panel ------------------------------ */
+
+.info-panel {
+  width: 300px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
+}
+
+.info-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.info-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.info-list dt {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.info-list dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.info-sub {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+
+/* ------------------------------ status bar ------------------------------ */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  min-height: 28px;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.status-item {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-item.file {
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.status-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border-strong);
+}
+
+/* -------------------------------- fullscreen ---------------------------- */
+
+body.is-fullscreen .toolbar,
+body.is-fullscreen .statusbar {
+  display: none;
 }
 
 /* ------------------------------- scrollbar ------------------------------ */
@@ -235,10 +399,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3d3d47;
+  background: var(--scrollbar);
   border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4d4d5a;
+  background: var(--scrollbar-hover);
 }

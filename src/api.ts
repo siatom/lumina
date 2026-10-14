@@ -150,6 +150,12 @@ export async function pickImage(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
+/** Native "open folder" dialog; returns the chosen directory or null. */
+export async function pickFolder(): Promise<string | null> {
+  const selected = await openDialog({ directory: true, multiple: false });
+  return typeof selected === "string" ? selected : null;
+}
+
 /** Native "save as" dialog restricted to the given extension. */
 export async function pickSavePath(
   defaultPath: string,
