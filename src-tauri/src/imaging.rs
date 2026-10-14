@@ -12,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::webp::WebPEncoder;
 use image::imageops::FilterType;
+use image::metadata::Orientation;
 use image::{AnimationDecoder, DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,20 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
 /// streamed without a re-encode. TIFF is intentionally excluded (browsers do
 /// not render it) and is transcoded to PNG by [`read_for_display`]. SVG *is*
 /// rendered natively by the webview, so it is streamed untouched as well.
+///
+/// # EXIF orientation (important)
+///
+/// For these formats [`read_for_display`] returns the **original bytes,
+/// orientation tag included, and must not rotate anything**. Blink (WebView2 /
+/// Edge, verified on 155.0.4283.45) applies EXIF orientation itself, following
+/// the CSS `image-orientation: from-image` default; the rotation is baked into
+/// the decoded bitmap, so it also affects `naturalWidth`/`naturalHeight` and
+/// canvas `drawImage`. Applying the rotation here as well would double-rotate.
+///
+/// Formats *outside* this list (TIFF) and every Rust-side raster path
+/// (thumbnails, frames, save-as, edits) produce output that the webview will
+/// **not** auto-rotate, so they bake the orientation into the pixels instead —
+/// see [`apply_exif_orientation`].
 pub const WEBVIEW_NATIVE_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
 
@@ -426,6 +441,66 @@ fn format_exposure(seconds: f64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// EXIF orientation
+// ---------------------------------------------------------------------------
+//
+// Why this matters: a camera stores portrait shots as landscape pixels plus an
+// EXIF `Orientation` tag telling viewers how to rotate them. Blink applies that
+// tag for the `<img>` original view (see [`WEBVIEW_NATIVE_EXTENSIONS`]), but a
+// PNG we synthesise in Rust carries no EXIF, so nothing downstream would
+// rotate it. Every Rust-side raster path therefore bakes the orientation into
+// the pixels, which keeps thumbnails / frames / saved files aligned with the
+// main view.
+//
+// Verified behaviour of the engine (Edge/WebView2 155.0.4283.45, run
+// `scripts\probe-webview2-orientation.cmd`) on a 96x64 fixture whose *stored*
+// top-left corner is red:
+//
+//   orientation 1 -> natural 96x64, red at top-left      (no transform)
+//   orientation 6 -> natural 64x96, red at top-right     (rotate 90 CW)
+//   orientation 8 -> natural 64x96, red at bottom-left   (rotate 270 CW)
+//
+// That is exactly `image::metadata::Orientation::from_exif` semantics, so
+// `DynamicImage::apply_orientation` reproduces the webview pixel-for-pixel.
+
+/// EXIF orientation of a file, or `None` when it is absent / invalid / 1.
+///
+/// Read through `kamadak-exif`, i.e. the *same* source as
+/// [`ImageMetadata::exif`], so the reported orientation and the applied
+/// transform can never disagree. Works for JPEG, TIFF, WebP and PNG (eXIf);
+/// SVG and BMP have no EXIF and yield `None`.
+fn exif_orientation(path: &Path) -> Option<Orientation> {
+    let file = fs::File::open(path).ok()?;
+    let mut buf = BufReader::new(file);
+    let exif = exif::Reader::new().read_from_container(&mut buf).ok()?;
+    let raw = field_by_num(&exif, exif::Tag::Orientation.number())?.value.get_uint(0)?;
+    // `from_exif` returns None for 0 and 9+, so bogus tags are ignored.
+    Orientation::from_exif(raw as u8)
+}
+
+/// Bake the EXIF orientation of `path` into `img`'s pixels.
+///
+/// Lossless: every variant is a 90-degree rotation and/or a mirror, so no
+/// resampling happens and no detail is lost.
+pub fn apply_exif_orientation(img: &mut DynamicImage, path: &Path) {
+    if let Some(orientation) = exif_orientation(path) {
+        img.apply_orientation(orientation);
+    }
+}
+
+/// Decode `path` and bake its EXIF orientation into the pixels.
+///
+/// Use this for anything that leaves the process (thumbnails, frames,
+/// converted / edited files). Use [`decode`] when you specifically want the
+/// stored pixels, and never apply this on the
+/// [`WEBVIEW_NATIVE_EXTENSIONS`] passthrough path.
+pub fn decode_oriented(path: &Path) -> Result<DynamicImage, AppError> {
+    let mut img = decode(path)?;
+    apply_exif_orientation(&mut img, path);
+    Ok(img)
+}
+
+// ---------------------------------------------------------------------------
 // SVG (vector) rasterisation
 // ---------------------------------------------------------------------------
 
@@ -501,7 +576,11 @@ pub fn rasterize_svg(path: &Path, max_edge: Option<u32>) -> Result<DynamicImage,
 // Decode / encode
 // ---------------------------------------------------------------------------
 
-/// Fully decode an image into memory. SVG documents are rasterised first.
+/// Fully decode an image into memory, **exactly as stored**.
+///
+/// SVG documents are rasterised first. The EXIF orientation is *not* applied —
+/// this is the raw-pixel primitive; use [`decode_oriented`] when the result is
+/// going to be shown or written anywhere.
 pub fn decode(path: &Path) -> Result<DynamicImage, AppError> {
     if is_svg(path) {
         return rasterize_svg(path, None);
@@ -553,6 +632,13 @@ pub fn encode_image(
 
 /// Produce a small PNG thumbnail that fits inside `max_size` on both axes,
 /// preserving aspect ratio. Always PNG so the result is webview-safe.
+///
+/// The EXIF orientation **is** applied, because the main view (`<img>` on the
+/// original file) has it applied by the engine — without this the thumbnail
+/// and the main view would disagree for portrait phone photos. The rotation is
+/// applied *after* the downscale: it is a pure 90-degree multiple (no
+/// resampling, no quality loss) so the order is free, and rotating the small
+/// image is much cheaper than rotating the full-size one.
 pub fn make_thumbnail(path: &Path, max_size: u32) -> Result<Vec<u8>, AppError> {
     // SVG is rasterised straight at the target size instead of at full size.
     if is_svg(path) {
@@ -560,36 +646,45 @@ pub fn make_thumbnail(path: &Path, max_size: u32) -> Result<Vec<u8>, AppError> {
         let thumb = img.thumbnail(max_size, max_size);
         return encode_png(&thumb);
     }
-    let img = decode(path)?;
-    let thumb = img.thumbnail(max_size, max_size);
+    let img = decode(path)?; // raw: orientation is applied after downscaling
+    let mut thumb = img.thumbnail(max_size, max_size);
+    apply_exif_orientation(&mut thumb, path);
     encode_png(&thumb)
 }
 
 /// Bytes to hand to an `<img>` element for the *original* view.
 ///
 /// For webview-native formats (incl. SVG) we stream the original file
-/// untouched (no re-encode, best quality + speed for large photos). For
-/// anything else (currently TIFF) we decode and transcode to PNG.
+/// untouched (no re-encode, best quality + speed for large photos) — including
+/// any EXIF orientation tag, which the engine applies itself (see
+/// [`WEBVIEW_NATIVE_EXTENSIONS`]). For anything else (currently TIFF) we decode,
+/// **bake the orientation into the pixels** and transcode to PNG, since the
+/// PNG we hand over carries no EXIF for the engine to act on.
 pub fn read_for_display(path: &Path) -> Result<(Vec<u8>, &'static str), AppError> {
     let ext = extension_of(path);
     if WEBVIEW_NATIVE_EXTENSIONS.contains(&ext.as_str()) {
         let bytes = fs::read(path)?;
         Ok((bytes, mime_for_ext(&ext)))
     } else {
-        let img = decode(path)?;
+        let mut img = decode(path)?;
+        apply_exif_orientation(&mut img, path);
         Ok((encode_png(&img)?, "image/png"))
     }
 }
 
 /// Re-encode `input` into `output`. When `format` is `None` the output format
 /// is inferred from the output file extension.
+///
+/// The EXIF orientation is baked into the pixels but the rest of the EXIF block
+/// is not copied, so the result must not keep a stale orientation tag — baking
+/// it is what makes the converted file display the same way as the original.
 pub fn convert_image(
     input: &Path,
     output: &Path,
     format: Option<ImageFormat>,
     quality: Option<u8>,
 ) -> Result<(), AppError> {
-    let img = decode(input)?;
+    let img = decode_oriented(input)?;
     let fmt = match format {
         Some(f) => f,
         None => resolve_output_format(None, output)?,
@@ -680,12 +775,18 @@ fn resize_image(img: DynamicImage, r: &ResizeSpec) -> Result<DynamicImage, AppEr
 }
 
 /// Decode `input`, apply `spec`, encode and write to `output`.
+///
+/// The EXIF orientation is normalised **first**, so the caller's `rotate` /
+/// `flip` / `crop` operate on the same pixels the user sees in the main view
+/// (which the engine auto-rotates). Without this, rotating a portrait phone
+/// photo would appear to rotate the wrong axis. The output carries no EXIF, so
+/// baking the orientation here cannot double-rotate.
 pub fn transform_image(
     input: &Path,
     output: &Path,
     spec: &TransformSpec,
 ) -> Result<(), AppError> {
-    let img = decode(input)?;
+    let img = decode_oriented(input)?;
     let img = apply_transform(img, spec)?;
     let format = resolve_output_format(spec.format.as_deref(), output)?;
     let bytes = encode_image(&img, format, spec.quality)?;
@@ -743,10 +844,22 @@ fn tiff_frame(path: &Path, index: u32) -> Result<DynamicImage, AppError> {
         }
         dec.next_image().map_err(tiff_error)?;
     }
+    // Orientation lives in the page's own IFD, so read it before consuming the
+    // decoder. Output is a PNG, which the engine will not auto-rotate, so the
+    // rotation has to be baked into the pixels here.
+    let orientation = dec
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::Orientation)
+        .ok()
+        .and_then(|v| Orientation::from_exif(v as u8));
+
     let (w, h) = dec.dimensions().map_err(tiff_error)?;
     let color = dec.colortype().map_err(tiff_error)?;
     let data = dec.read_image().map_err(tiff_error)?;
-    tiff_to_dynamic(w, h, color, data)
+    let mut img = tiff_to_dynamic(w, h, color, data)?;
+    if let Some(orientation) = orientation {
+        img.apply_orientation(orientation);
+    }
+    Ok(img)
 }
 
 fn tiff_to_dynamic(
@@ -812,8 +925,12 @@ pub fn page_count(path: &Path) -> Result<u32, AppError> {
 }
 
 /// Extract a single page / frame as PNG bytes.
+///
+/// The page's EXIF orientation is baked into the pixels: the response is a PNG
+/// (no orientation tag), so the engine has nothing to auto-rotate.
 pub fn read_frame_png(path: &Path, index: u32) -> Result<Vec<u8>, AppError> {
-    let img = match extension_of(path).as_str() {
+    let ext = extension_of(path);
+    let mut img = match ext.as_str() {
         "gif" => {
             let frames = gif_frames(path)?;
             let f = frames.get(index as usize).ok_or_else(|| {
@@ -834,6 +951,7 @@ pub fn read_frame_png(path: &Path, index: u32) -> Result<Vec<u8>, AppError> {
             })?;
             DynamicImage::ImageRgba8(f.buffer().clone())
         }
+        // `tiff_frame` already applies the per-page orientation tag.
         "tif" | "tiff" => tiff_frame(path, index)?,
         _ => {
             if index != 0 {
@@ -844,6 +962,9 @@ pub fn read_frame_png(path: &Path, index: u32) -> Result<Vec<u8>, AppError> {
             decode(path)?
         }
     };
+    if ext != "tif" && ext != "tiff" {
+        apply_exif_orientation(&mut img, path);
+    }
     encode_png(&img)
 }
 
