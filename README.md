@@ -62,6 +62,34 @@ docs/INTERFACES.md           ★ IPC 接口规范（前端 / 格式模块的契�
 
 `png` `jpg/jpeg` `gif` `webp` `bmp` `tif/tiff` `ico`
 
+## 应用图标
+
+图标源：[`assets/icon.svg`](assets/icon.svg)（1024×1024，另有栅格化产物 `assets/app-icon.png`）。
+
+- **设计意象**：光圈（镜头叶片）+ 从中透出的光，把应用名 **Lumina（光）** 与「看图」这件事合成一个符号。
+- **造型**：圆角方形底板（squircle，圆角半径 = 0.219 × 边长），深蓝对角渐变底 + 蓝色六叶光圈 + 中心白色光晕；光圈几何取自 Lucide `aperture` 图标（24×24 网格），缩放 32 倍并按小尺寸加大线宽。
+- **配色**：底板 `#0E1420 → #1C2637`，符号 `#6EA8FE`，点睛为白色径向光。扁平、双色为主、单层渐变。
+- 已用**像素级缩放自检** 16 / 32 px：32 px 清晰可辨，16 px 仍能看出「光圈 + 中心亮点」。
+
+已通过 `pnpm tauri icon assets/app-icon.png` 派生全平台图标并替换 `src-tauri/icons/` 下的默认图标：
+
+| 平台 | 文件 |
+| --- | --- |
+| Windows | `icon.ico`（16/24/32/48/64/256，六种尺寸） |
+| macOS | `icon.icns` |
+| Linux / 通用 | `32x32.png` `64x64.png` `128x128.png` `128x128@2x.png` `icon.png` |
+| Windows Store | `Square*Logo.png` `StoreLogo.png` |
+| 移动端 | `android/`、`ios/` |
+
+`src-tauri/build.rs` 已注册 `cargo:rerun-if-changed=icons`，改图标后会重新嵌入 exe。已实测确认 exe 内嵌图标为新图标。
+
+重新生成流程：
+
+```bash
+magick -background none -density 384 assets/icon.svg -resize 1024x1024 -depth 8 assets/app-icon.png
+pnpm tauri icon assets/app-icon.png
+```
+
 ## 快捷键
 
 | 按键 | 功能 |
