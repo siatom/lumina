@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use image::DynamicImage;
+
 use crate::imaging::{self, CropRect, ResizeSpec, TransformSpec};
 
 fn fixtures() -> PathBuf {
@@ -15,6 +17,59 @@ fn fixtures() -> PathBuf {
 
 fn f(name: &str) -> PathBuf {
     fixtures().join(name)
+}
+
+/* -------------------------------------------------------------------------- */
+/* Orientation helpers                                                         */
+/* -------------------------------------------------------------------------- */
+
+/// Which corner of a rendered image is red.
+///
+/// The `orient*.{jpg,tiff}` fixtures store a RED block in their *stored*
+/// top-left corner over a dark blue field, so the applied orientation can be
+/// read off directly: a 90-degree rotation moves the block to another corner.
+/// Mirrors what `scripts/probe-webview2-orientation.cmd` measures in Blink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Corner {
+    Tl,
+    Tr,
+    Bl,
+    Br,
+}
+
+fn red_corner(img: &DynamicImage) -> Option<Corner> {
+    let rgb = img.to_rgb8();
+    let (w, h) = (rgb.width(), rgb.height());
+    assert!(w >= 16 && h >= 16, "image too small for corner probing: {w}x{h}");
+
+    // Average a 9x9 patch so JPEG ringing around the block edge cannot decide
+    // the answer on its own.
+    let patch = |cx: u32, cy: u32| -> (f64, f64, f64) {
+        let (mut r, mut g, mut b, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for dy in -4i64..=4 {
+            for dx in -4i64..=4 {
+                let x = (cx as i64 + dx).clamp(0, w as i64 - 1) as u32;
+                let y = (cy as i64 + dy).clamp(0, h as i64 - 1) as u32;
+                let p = rgb.get_pixel(x, y);
+                r += p[0] as f64;
+                g += p[1] as f64;
+                b += p[2] as f64;
+                n += 1.0;
+            }
+        }
+        (r / n, g / n, b / n)
+    };
+    let is_red = |(r, g, b): (f64, f64, f64)| r > 140.0 && g < 110.0 && b < 110.0;
+
+    [
+        (Corner::Tl, patch(5, 5)),
+        (Corner::Tr, patch(w - 6, 5)),
+        (Corner::Bl, patch(5, h - 6)),
+        (Corner::Br, patch(w - 6, h - 6)),
+    ]
+    .into_iter()
+    .find(|(_, c)| is_red(*c))
+    .map(|(corner, _)| corner)
 }
 
 /// (fixture, expected normalised format, expected dimensions)
@@ -214,6 +269,138 @@ fn operations_matrix() {
     assert!(s95 > s20, "quality 95 ({s95}) should be larger than 20 ({s20})");
     println!("jpeg quality 20 -> {s20} bytes, quality 95 -> {s95} bytes");
     println!("=== 图像操作通过 ===\n");
+
+    std::fs::remove_dir_all(&out_dir).ok();
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 2C-B: EXIF orientation is actually applied                           */
+/* -------------------------------------------------------------------------- */
+//
+// Reference: `scripts/probe-webview2-orientation.cmd` measures headless
+// Edge/WebView2 (Blink 155.0.4283.45) against these very fixtures:
+//
+//     orient1.jpg natural=96x64 red=tl
+//     orient6.jpg natural=64x96 red=tr   (engine rotated 90 CW)
+//     orient8.jpg natural=64x96 red=bl   (engine rotated 270 CW)
+//
+// i.e. the WebView *does* honour the JPEG EXIF orientation for the main view.
+// The Rust-side thumbnail therefore has to bake the same rotation in, or the
+// thumbnail and the main view would disagree for portrait photos.
+
+#[test]
+fn exif_orientation_thumbnail_matches_webview() {
+    // The `make_thumbnail` contract: downscale first, then rotate. A 90-degree
+    // multiple is lossless so the order only matters for speed, not quality.
+    println!("\n=== EXIF orientation: make_thumbnail ===");
+    println!("{:<14} {:<12} {:<12} {:<10}", "fixture", "thumb size", "red corner", "expected");
+
+    let cases: &[(&str, u32, u32, Corner)] = &[
+        ("orient1.jpg", 48, 32, Corner::Tl),
+        ("orient6.jpg", 32, 48, Corner::Tr),
+        ("orient8.jpg", 32, 48, Corner::Bl),
+    ];
+    for (name, w, h, expect) in cases {
+        let png = imaging::make_thumbnail(&f(name), 48)
+            .unwrap_or_else(|e| panic!("thumbnail failed for {name}: {e}"));
+        let thumb = image::load_from_memory(&png).unwrap();
+        assert_eq!(
+            (thumb.width(), thumb.height()),
+            (*w, *h),
+            "thumbnail dimensions for {name}"
+        );
+        let corner = red_corner(&thumb);
+        assert_eq!(corner, Some(*expect), "red corner for {name}");
+        println!(
+            "{:<14} {:<12} {:<12} {:<10}",
+            name,
+            format!("{}x{}", thumb.width(), thumb.height()),
+            format!("{:?}", corner.unwrap()),
+            format!("{expect:?}"),
+        );
+    }
+    println!("=== 缩略图方向与 WebView 一致 ===\n");
+}
+
+#[test]
+fn exif_orientation_transcode_applies_before_encode() {
+    // `read_for_display` for a *non*-webview-native format (TIFF) decodes,
+    // bakes the orientation into the pixels, then encodes PNG — the PNG has no
+    // EXIF block at all, so the engine cannot re-rotate it. Assert the pixels
+    // are already oriented (red corner matches the WebView probe).
+    println!("\n=== EXIF orientation: TIFF -> PNG transcode ===");
+    let cases: &[(&str, Corner)] = &[("orient6.tiff", Corner::Tr), ("orient8.tiff", Corner::Bl)];
+    for (name, expect) in cases {
+        let (png, mime) = imaging::read_for_display(&f(name))
+            .unwrap_or_else(|e| panic!("display failed for {name}: {e}"));
+        assert_eq!(mime, "image/png", "TIFF must transcode to PNG");
+        assert_eq!(&png[0..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        let img = image::load_from_memory(&png).unwrap();
+        assert_eq!((img.width(), img.height()), (64, 96), "oriented size for {name}");
+        let corner = red_corner(&img);
+        assert_eq!(corner, Some(*expect), "red corner for {name}");
+        println!(
+            "{:<14} {:<12} {:<10}",
+            name,
+            format!("{}x{}", img.width(), img.height()),
+            format!("{:?}", corner.unwrap()),
+        );
+    }
+    println!("=== 转码路径已烘焙方向 ===\n");
+}
+
+#[test]
+fn webview_native_passthrough_keeps_raw_bytes() {
+    // For webview-native formats (JPEG here) `read_for_display` must stream the
+    // *original* bytes: re-orienting in Rust would double-rotate (the engine
+    // already applies the EXIF tag). Byte-for-byte equality proves no re-encode.
+    println!("\n=== EXIF orientation: webview-native 直通不改字节 ===");
+    for name in ["orient1.jpg", "orient6.jpg", "orient8.jpg"] {
+        let path = f(name);
+        let (bytes, mime) = imaging::read_for_display(&path).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(mime, "image/jpeg", "{name} mime");
+        assert_eq!(bytes, raw, "{name} bytes must be untouched");
+        println!("{name:<14} passthrough {} bytes == raw file", bytes.len());
+    }
+    println!("=== JPEG 原样透传（引擎自行旋转）===\n");
+}
+
+#[test]
+fn convert_and_transform_use_oriented_pixels() {
+    // `convert_image` / `transform_image` decode through `decode_oriented`, so
+    // the output carries the pixels already rotated and no stale orientation
+    // tag. Converting orient6.jpg (rotate 90 CW) to PNG must yield a 64x96 PNG
+    // with red at top-right — exactly what the `<img>` view shows.
+    let out_dir = std::env::temp_dir().join("lumina-orient");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let out = out_dir.join("orient6.png");
+    imaging::convert_image(&f("orient6.jpg"), &out, None, None).unwrap();
+    let img = image::load_from_memory(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!((img.width(), img.height()), (64, 96), "convert normalises orientation");
+    assert_eq!(red_corner(&img), Some(Corner::Tr));
+
+    // transform_image on the same source sees an already-oriented 64x96 image,
+    // so cropping the top-right (red) corner keeps the marker. After the 90 CW
+    // rotation the 24x16 stored block sits at x in [48,64), y in [0,24).
+    let crop = out_dir.join("crop.png");
+    imaging::transform_image(
+        &f("orient6.jpg"),
+        &crop,
+        &TransformSpec {
+            crop: Some(CropRect { x: 44, y: 0, width: 20, height: 20 }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let c = image::load_from_memory(&std::fs::read(&crop).unwrap()).unwrap();
+    assert_eq!((c.width(), c.height()), (20, 20));
+    assert!(red_corner(&c).is_some(), "top-right crop should contain the red marker");
+
+    println!("\n=== convert/transform 统一按已定向像素处理 ===");
+    println!("orient6.jpg -> PNG {}x{}, red=Tr", img.width(), img.height());
+    println!("crop(44,0,20x20) 命中红色标记 = {}\n", red_corner(&c).is_some());
 
     std::fs::remove_dir_all(&out_dir).ok();
 }
