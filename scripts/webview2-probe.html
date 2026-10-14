@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<!--
+  Probe: does the WebView2 / Blink engine auto-apply EXIF orientation to <img> ?
+
+  Loaded headless by scripts/probe-webview2-orientation.cmd. For each fixture it
+  reports one line:
+
+    FIXTURE <name> natural=<w>x<h> stored=<w>x<h> red=<tl|tr|bl|br|none>
+
+  Two independent signals:
+    * naturalWidth/Height  — if Blink applied the orientation, the axes are swapped
+                             (stored 96x64 -> natural 64x96 for orientation 6/8).
+    * canvas drawImage     — which corner of the *rendered* bitmap is red.
+
+  The fixtures store a RED block in their top-left corner, so:
+    orientation 1 -> red=tr? no: red=tl      (no transform)
+    orientation 6 -> red=tr  (rotate 90 CW)
+    orientation 8 -> red=bl  (rotate 270 CW)
+-->
+<meta charset="utf-8">
+<title>lumina orientation probe</title>
+<style>body{margin:0;font:14px monospace}#out{white-space:pre}</style>
+<pre id="out">PENDING</pre>
+<img id="probe" style="display:none">
+<script>
+const FIXTURES = ["orient1.jpg", "orient6.jpg", "orient8.jpg", "photo.jpg"];
+const STORED = { "orient1.jpg": [96, 64], "orient6.jpg": [96, 64], "orient8.jpg": [96, 64] };
+
+function patchAvg(ctx, cx, cy) {
+  const d = ctx.getImageData(cx - 4, cy - 4, 9, 9).data;
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+  return [r / n, g / n, b / n];
+}
+const isRed = ([r, g, b]) => r > 140 && g < 110 && b < 110;
+
+function loadOne(img, src) {
+  return new Promise((resolve) => {
+    img.onload = () => resolve(true);
+    img.onerror = () => resolve(false);
+    img.src = src;
+  });
+}
+
+(async () => {
+  const lines = [];
+  const img = document.getElementById("probe");
+  for (const name of FIXTURES) {
+    const src = new URL("../src-tauri/tests/fixtures/" + name, location.href).href;
+    if (!(await loadOne(img, src))) { lines.push(`FIXTURE ${name} LOAD_FAILED`); continue; }
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const stored = STORED[name] ? `${STORED[name][0]}x${STORED[name][1]}` : "?";
+    // Axis swap alone already proves Blink applied the orientation.
+    const swapped = stored === "?" ? "?" : (w === Number(stored.split("x")[1]) ? "yes" : "no");
+    let red = "canvas-error";
+    try {
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const corners = {
+        tl: patchAvg(ctx, 5, 5),
+        tr: patchAvg(ctx, w - 6, 5),
+        bl: patchAvg(ctx, 5, h - 6),
+        br: patchAvg(ctx, w - 6, h - 6),
+      };
+      red = Object.keys(corners).filter((k) => isRed(corners[k])).join(",") || "none";
+    } catch (e) {
+      red = "canvas-error:" + e.name;
+    }
+    lines.push(`FIXTURE ${name} natural=${w}x${h} stored=${stored} axes-swapped=${swapped} red=${red}`);
+  }
+  document.getElementById("out").textContent = lines.join("\n");
+})().catch((e) => {
+  document.getElementById("out").textContent = "PROBE_ERROR " + e.name + ": " + e.message;
+});
+</script>
