@@ -4,8 +4,10 @@
 //! - [`imaging`]  : UI-agnostic decode / metadata / thumbnail / convert pipeline
 //! - [`commands`] : Tauri IPC commands (the frontend contract)
 //! - [`protocol`] : custom `lumina://` URI scheme used to stream image bytes
+//! - [`cache`]    : process-wide LRU for generated thumbnails
 //! - [`error`]    : shared typed error
 
+mod cache;
 mod commands;
 mod error;
 mod imaging;
@@ -20,8 +22,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .register_uri_scheme_protocol(protocol::SCHEME, |ctx, request| {
-            protocol::handle(ctx, request)
+        .register_asynchronous_uri_scheme_protocol(protocol::SCHEME, |ctx, request, responder| {
+            protocol::handle(ctx, request, responder)
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_image_metadata,

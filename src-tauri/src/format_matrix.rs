@@ -202,6 +202,29 @@ fn exif_matrix() {
     println!("=== EXIF 通过 ===\n");
 }
 
+/// The frontend derives the *display* dimensions from `exif.orientation`
+/// (the webview applies the rotation itself), so the orientation tag must be
+/// readable for every container Lumina renders — not just JPEG.
+#[test]
+fn exif_orientation_is_reported_for_every_container() {
+    println!("\n=== EXIF orientation is reported per container ===");
+    for (name, expected) in [
+        ("orient6.jpg", 6u16),
+        ("orient8.jpg", 8),
+        ("orient6.tiff", 6),
+        ("orient8.tiff", 8),
+    ] {
+        let meta = imaging::read_metadata(&f(name)).unwrap();
+        let orientation = meta.exif.as_ref().and_then(|e| e.orientation);
+        println!(
+            "{name:<14} orientation = {orientation:?}, stored = {}x{}",
+            meta.width, meta.height
+        );
+        assert_eq!(orientation, Some(expected), "{name} orientation not reported");
+    }
+    println!("=== orientation matrix 通过 ===\n");
+}
+
 #[test]
 fn avif_is_reported_unsupported() {
     // Fixture exists (ImageMagick wrote it) but Lumina has no pure-Rust AVIF

@@ -49,14 +49,16 @@
 1. **原图浏览** → `lumina://...&mode=full`
    - WebView 原生支持的格式（png/jpg/jpeg/gif/webp/bmp/ico）**直接返回原始文件字节**：不解码、不重编码，零质量损失，最快。
    - WebView 不支持的格式（当前是 **TIFF**）→ Rust 解码后**转码成 PNG** 再返回。
-2. **缩略图** → `lumina://...&mode=thumb&max=128`
+2. **缩略图** → `lumina://...&mode=thumb&max=128&v=<rev>`
    - 在 Rust 侧 `thumbnail()` 降采样后再编码为 PNG，避免把原始大图传给前端。
-   - 前端用 `IntersectionObserver` 懒加载，只对进入视口的缩略图发起请求。
+   - 结果按 `(path, v, max)` 进**进程内 LRU 缓存**（`src-tauri/src/cache.rs`，512 条），重复滚动/回看同一目录不再重复解码。
+   - 前端用 `IntersectionObserver` 懒加载，只对进入视口的缩略图发起请求，并以**最多 6 个并发**的池加载。
+   - `v` 是 `<modified_ms>-<file_size>` 版本令牌：既是缓存键，也让 URL 随文件修订变化（协议对带 `v` 的请求回 `Cache-Control: immutable`）。
 3. **兜底通道** → `get_image_bytes` 命令（`tauri::ipc::Response`，原始字节）
    - 前端在 `<img>` 触发 `error` 时（协议不可用等）自动回退，保证在任何环境下都能显示。
    - 注意：这里返回的是**原始字节**而非 base64，仍然比 base64 方案省 33% 带宽与内存。
 
-> 后续优化方向（阶段 2+）：给 `lumina://` 增加 LRU 解码缓存、按需 `max` 的渐进式降采样（`image` 的 `resize` + 解码器 hint）。（EXIF 方向自动应用已在阶段 2C-B 完成，见第 9 节。）
+> 后续优化方向（阶段 2+）：给 `mode=full` 的原始字节也加 LRU 缓存、按需 `max` 的渐进式降采样（`image` 的 `resize` + 解码器 hint）。（缩略图 LRU 缓存已在性能优化中落地；EXIF 方向自动应用已在阶段 2C-B 完成，见第 9 节。）
 
 ---
 
@@ -399,7 +401,7 @@ cd src-tauri && cargo test --lib -- --nocapture    # 打印「格式 × 结果�
 
 - **只用 `src/api.ts`**，不要直接 `invoke`。类型、错误处理、`lumina://` URL 构造都已封装。
 - **显示原图**：`img.src = await luminaImageUrl(path, { mode: "full" })`；务必监听 `error` 事件并回退到 `getImageBlob(path)`（`src/main.ts` 已示范）。**SVG 与动图 GIF/WebP 都可直接这样显示**。
-- **缩略图墙**：用 `IntersectionObserver` 懒加载 `getThumbnail(path, 128)`，并对返回的 `Blob` 调用 `URL.createObjectURL`；**记得在 `img.onload` 后 `URL.revokeObjectURL`** 释放内存。
+- **缩略图墙**：用 `IntersectionObserver` 懒加载，直接 `img.src = await luminaImageUrl(path, { mode: "thumb", max: 128, version })`（`version` = `<modified_ms>-<file_size>`，来自 `listImages` 的条目）。协议不可用时再回退到 `getThumbnail(path, 128)` + `URL.createObjectURL`（记得在 `load`/`error` 后 `URL.revokeObjectURL`）。建议用并发池限制同时在飞的请求数（`src/main.ts` 用 6）。
 - **上一张/下一张**：一次 `listImages` 拿到全目录 + 当前下标，本地计算索引即可，不要每张都重新列目录。
 - **编辑（阶段 2B）**：旋转/翻转可先用 CSS `transform` 做**即时预览**，点「保存」时再用 `transformImage(path, out, { rotate, flipHorizontal, ... })` 落到文件；裁剪/缩放请在 UI 里换算成**源图坐标**后传 `crop` / `resize`（顺序见 4.6）。
 - **列表信息面板**：`getImageMetadata` 现在带镜头、作者、版权、GPS 十进制度，可直接展示。
@@ -409,12 +411,12 @@ cd src-tauri && cargo test --lib -- --nocapture    # 打印「格式 × 结果�
 
 ## 8. 已知限制 / 待办
 
-1. 自定义协议**未做解码结果缓存**，同一张图重复请求会重复解码（缩略图有懒加载缓解）。
+1. 自定义协议对 **`mode=thumb` 有进程内 LRU 缓存**（`cache.rs`）；`mode=full` 的原始字节仍**未缓存**，同一张图重复请求会重新读盘（`fs::read`，受 OS page cache 加速）。
 2. ~~EXIF 方向未自动应用~~ → **阶段 2C-B 已修复**，见第 9 节（缩略图/转码路径/转换编辑统一按方向旋转，webview 原生格式走原字节直通避免二次旋转）。
 3. `list_images` 非递归、不分页，超大目录（数万文件）需要虚拟化。
 4. **AVIF / HEIC 解码未支持**，见第 6 节 C；SVG 已支持。
 5. **有损 WebP 编码未支持**（`image` crate 仅无损）。
-6. `get_image_pages` 通过完整解码计数，大动图较慢；无缓存。
+6. `get_image_pages` 通过完整解码计数，大动图较慢；无缓存。前端已按扩展名（gif/webp/tif/tiff）门控，且**不阻塞主图显示**（fire-and-forget）。
 7. 多页/调色板 TIFF 见第 6 节 C（像素解码不支持 palette/bilevel）。
 8. `transform_image` 每次都是「整图解码 → 编辑 → 编码」，大图会一次性占用较多内存；尚未做流式/分块处理。
 9. 尚未验证的运行时项：`lumina://` 在 Windows WebView2 下的实际加载、`dialog` 权限在生产构建下的行为（阶段 1 已通过编译/单测/前端构建，GUI 冒烟见 README）。
@@ -459,18 +461,19 @@ FIXTURE orient8.jpg natural=64x96 stored=96x64 axes-swapped=yes red=bl   # 引�
 ### 9.4 固件与断言
 
 - `scripts/make-exif.py` 生成 `orient{1,6,8}.jpg`（存储 96×64，存储左上角为红色块）+ `orient6.tiff` / `orient8.tiff`（TIFF baseline tag 274）。
-- `src-tauri/src/format_matrix.rs` 新增 4 个断言用例（`cargo test` 全绿）：
+- `src-tauri/src/format_matrix.rs` 新增 5 个断言用例（`cargo test` 全绿）：
   - `exif_orientation_thumbnail_matches_webview`：缩略图 48×32/32×48，红角 TL/TR/BL 与 9.2 的探针一致。
   - `exif_orientation_transcode_applies_before_encode`：`orient6.tiff`/`orient8.tiff` → PNG 64×96，红角 TR/BL。
   - `webview_native_passthrough_keeps_raw_bytes`：JPEG `mode=full` 返回字节与文件**逐字节相等**（证明未重编码）。
   - `convert_and_transform_use_oriented_pixels`：`convert_image(orient6.jpg→png)` = 64×96 红角 TR；`transform_image` 裁剪已定向坐标命中标记。
+  - `exif_orientation_is_reported_for_every_container`：JPEG **与** TIFF 都能读到 `orientation`（前端 9.6 的显示尺寸推导依赖它）。
 
 复现：
 
 ```bash
 python scripts/make-exif.py                          # 造固件
 src-tauri> cargo test orientation -- --nocapture      # 打印方向断言表
-src-tauri> cargo test --all-targets                   # 全量（21 项）
+src-tauri> cargo test --all-targets                   # 全量（23 项）
 ```
 
 ### 9.5 给 Prism 的注意点
@@ -479,3 +482,16 @@ src-tauri> cargo test --all-targets                   # 全量（21 项）
 - **不要**在前端对原生格式再叠加 `transform: rotate(...)`——会与引擎的自动旋转叠加。
 - 缩略图（`getThumbnail` / `mode=thumb`）与主视图现在方向**一致**，可放心并排显示。
 - 若前端要把图绘到 `<canvas>`（`drawImage`）再处理：canvas 按**原始像素**绘制，**不含** EXIF 自动旋转；需要方向一致时请改用 `getImageFrame`/`transformImage` 的输出（那些是已定向像素）。
+
+### 9.6 前端显示坐标系（坐标偏移修复）
+
+`read_metadata` 返回的 `width/height` 是**存储尺寸**（`into_dimensions()` 只读文件头），而引擎渲染 orientation 5–8 的图时会**对调宽高**。前端若直接用存储尺寸做 fit / 缩放 / 裁剪，竖拍照片就会出现「方向正确但坐标错位」——fit 比例不对、裁剪框偏移、裁剪结果与所见不符。
+
+修法（`src/main.ts`）：
+
+- 新增 `orientedDims(m)`：orientation ∈ {5,6,7,8} 时对调宽高，得到**显示尺寸**。
+- `openPath` 中 `meta.width/height` 与 `fileDims` 一律改用显示尺寸；信息面板「尺寸」也显示显示尺寸（EXIF「方向」仍单列一行）。
+- 于是 `viewDims` / `fitScale` / `centerImage` / `origin` / `imageToStage` / `stageToImage` / `validateCrop` / `cropRectFromStage` 全部落在**显示像素坐标系**，与后端 `decode_oriented`（`transform_image` 的裁剪坐标系）一致 —— 裁剪坐标因此前后端对齐。
+- **安全网**：`viewer` 的 `load` 事件里用 `naturalWidth/naturalHeight` 校正 `meta` 并 `reflow()`，覆盖「EXIF 缺失但引擎仍旋转」或「后端已把方向烘进像素」（TIFF 转码、取帧）的情况；两者一致时是 no-op，无跳变。
+
+> 注意：`getImageMetadata` 的 `width/height` 语义仍是**存储尺寸**（后端契约不变），显示尺寸的推导由前端按 `exif.orientation` 完成。

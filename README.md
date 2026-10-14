@@ -39,10 +39,11 @@ src/                         前端（原生 TS）
   api.ts                     类型化 IPC 封装（唯一的前端调用入口）
   styles.css
 src-tauri/src/
-  lib.rs                     Tauri Builder：插件注册、命令注册、协议注册
-  commands.rs                IPC 命令层
+  lib.rs                     Tauri Builder：插件注册、命令注册、异步协议注册
+  commands.rs                IPC 命令层（重活命令均为 async）
   imaging.rs                 核心管线：解码 / 元信息 / EXIF / 缩略图 / 转换（不依赖 Tauri，可单测）
-  protocol.rs                lumina:// 自定义协议（流式传输图片字节）
+  protocol.rs                lumina:// 自定义协议（异步、流式传输图片字节）
+  cache.rs                   缩略图进程内 LRU 缓存
   error.rs                   统一错误类型
 docs/INTERFACES.md           ★ IPC 接口规范（前端 / 格式模块的契约）
 ```
@@ -106,10 +107,10 @@ pnpm tauri icon assets/app-icon.png
 ## 验证状态
 
 - ✅ `cargo check` 无警告
-- ✅ `cargo test` — 6 项通过（含端到端管线：解码 → 元信息 → 缩略图 → 转码 → 目录列举）
+- ✅ `cargo test` — 22 项通过（含端到端管线：解码 → 元信息 → 缩略图 → 转码 → 目录列举，以及缩略图 LRU 缓存）
 - ✅ `pnpm build`（tsc + vite）通过
 - ✅ `pnpm tauri dev` 可编译并启动应用进程（自动化环境中无法人工目视验证窗口渲染与 `lumina://` 加载）
 
 ## 已知限制
 
-见 [`docs/INTERFACES.md` §8](docs/INTERFACES.md#8-已知限制--待办)：暂无解码缓存、EXIF 方向未自动应用、目录列举非递归、`save_image_as` 无质量参数。
+见 [`docs/INTERFACES.md` §8](docs/INTERFACES.md#8-已知限制--待办)：`mode=full` 原始字节暂无缓存、EXIF 方向未自动应用、目录列举非递归、`save_image_as` 无质量参数。

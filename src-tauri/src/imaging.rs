@@ -87,6 +87,9 @@ pub struct ImageMetadata {
     pub width: u32,
     pub height: u32,
     pub file_size: u64,
+    /// Last-modified time in milliseconds since the Unix epoch (0 if unknown).
+    /// Used by the frontend as a cache-busting version token.
+    pub modified_ms: u64,
     pub has_exif: bool,
     pub exif: Option<ExifData>,
 }
@@ -98,6 +101,8 @@ pub struct ImageEntry {
     pub file_name: String,
     pub format: String,
     pub file_size: u64,
+    /// Last-modified time in milliseconds since the Unix epoch (0 if unknown).
+    pub modified_ms: u64,
 }
 
 /// Result of [`list_directory`]: the sibling images plus the index of the
@@ -176,6 +181,28 @@ pub fn extension_of(path: &Path) -> String {
 /// Whether `path` has an extension Lumina supports.
 pub fn is_supported(path: &Path) -> bool {
     SUPPORTED_EXTENSIONS.contains(&extension_of(path).as_str())
+}
+
+/// Last-modified time of `md` in milliseconds since the Unix epoch, or 0 when
+/// the platform / filesystem does not report one.
+fn modified_ms_of(md: &fs::Metadata) -> u64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Cache-busting revision token for `path`: `<modified_ms>-<file_size>`.
+///
+/// Matches the token the frontend builds from [`ImageMetadata`] / [`ImageEntry`]
+/// so protocol requests and directory listings agree on the same cache key.
+/// Empty when the file cannot be stat'd.
+pub fn revision_of(path: &Path) -> String {
+    match fs::metadata(path) {
+        Ok(md) => format!("{}-{}", modified_ms_of(&md), md.len()),
+        Err(_) => String::new(),
+    }
 }
 
 /// Whether `path` is an SVG (handled by the vector rasteriser).
@@ -265,14 +292,16 @@ fn reader_for(path: &Path) -> Result<ImageReader<BufReader<fs::File>>, AppError>
 
 /// Read dimensions + format from the header only (no full decode).
 pub fn read_metadata(path: &Path) -> Result<ImageMetadata, AppError> {
-    if !path.is_file() {
+    let md = fs::metadata(path)?;
+    if !md.is_file() {
         return Err(AppError::Other(format!(
             "not a readable file: {}",
             path.display()
         )));
     }
 
-    let file_size = fs::metadata(path)?.len();
+    let file_size = md.len();
+    let modified_ms = modified_ms_of(&md);
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -289,6 +318,7 @@ pub fn read_metadata(path: &Path) -> Result<ImageMetadata, AppError> {
             width,
             height,
             file_size,
+            modified_ms,
             has_exif: false,
             exif: None,
         });
@@ -313,6 +343,7 @@ pub fn read_metadata(path: &Path) -> Result<ImageMetadata, AppError> {
         width,
         height,
         file_size,
+        modified_ms,
         has_exif: exif.is_some(),
         exif,
     })
@@ -1032,10 +1063,14 @@ pub fn list_directory(dir: &Path, current: Option<&Path>) -> Result<DirectoryLis
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() || !is_supported(&path) {
+        // `file_type()` comes from the directory entry itself (d_type on Unix),
+        // avoiding the extra `stat` that `path.is_file()` would perform.
+        if !entry.file_type()?.is_file() || !is_supported(&path) {
             continue;
         }
-        let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let md = entry.metadata().ok();
+        let file_size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified_ms = md.as_ref().map(modified_ms_of).unwrap_or(0);
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -1046,6 +1081,7 @@ pub fn list_directory(dir: &Path, current: Option<&Path>) -> Result<DirectoryLis
             file_name,
             format: extension_of(&path),
             file_size,
+            modified_ms,
         });
     }
 
@@ -1163,6 +1199,7 @@ mod tests {
         assert_eq!(meta.format, "png");
         assert_eq!(meta.file_name, "sample.png");
         assert!(meta.file_size > 0);
+        assert!(meta.modified_ms > 0, "mtime should be reported");
 
         // --- thumbnail: fits the box, keeps aspect ratio, is a real PNG ---
         let thumb = make_thumbnail(&png, 16).unwrap();
@@ -1192,6 +1229,7 @@ mod tests {
             vec!["sample.png", "sample.tiff", "sample2.png", "sample10.png"]
         );
         assert_eq!(listing.index, Some(0));
+        assert!(listing.entries.iter().all(|e| e.modified_ms > 0));
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -53,6 +53,9 @@ tiff = "0.11"
 # Basic EXIF metadata reading.
 kamadak-exif = "0.6"
 
+# Bounded in-process LRU for generated thumbnails (pure Rust, no native deps).
+lru = "0.12"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

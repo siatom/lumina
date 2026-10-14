@@ -38,6 +38,8 @@ export interface ImageMetadata {
   height: number;
   /** Bytes. */
   file_size: number;
+  /** Last-modified time in milliseconds since the Unix epoch (0 if unknown). */
+  modified_ms: number;
   has_exif: boolean;
   exif: ExifData | null;
 }
@@ -47,6 +49,8 @@ export interface ImageEntry {
   file_name: string;
   format: string;
   file_size: number;
+  /** Last-modified time in milliseconds since the Unix epoch (0 if unknown). */
+  modified_ms: number;
 }
 
 export interface DirectoryListing {
@@ -294,14 +298,20 @@ export async function protocolBase(): Promise<string> {
  *
  * This is the preferred transport: the bytes are streamed by the webview
  * directly from Rust, with no base64 inflation and no JSON IPC hop.
+ *
+ * `version` (typically `<modified_ms>-<file_size>`) is echoed back as the `v`
+ * query parameter. It serves two purposes: it lets the backend key its
+ * thumbnail cache without a `stat`, and it gives the webview a distinct URL per
+ * file revision so a cached entry is never served after the file changes.
  */
 export async function luminaImageUrl(
   path: string,
-  opts: { mode?: ImageMode; max?: number } = {},
+  opts: { mode?: ImageMode; max?: number; version?: string | number } = {},
 ): Promise<string> {
   const base = await protocolBase();
   const q = new URLSearchParams({ path, mode: opts.mode ?? "full" });
   if (opts.max !== undefined) q.set("max", String(opts.max));
+  if (opts.version !== undefined) q.set("v", String(opts.version));
   return `${base}/?${q.toString()}`;
 }
 

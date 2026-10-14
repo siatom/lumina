@@ -13,14 +13,17 @@ use crate::protocol;
 ///
 /// `path` is the *original* file path; the frontend turns it into a display URL
 /// via the `lumina://` protocol (see [`get_protocol_base`]).
-#[tauri::command]
+///
+/// Runs on the async runtime (`async`), not the main thread, so header reads
+/// and EXIF parsing never freeze the UI.
+#[tauri::command(async)]
 pub fn get_image_metadata(path: String) -> Result<ImageMetadata, String> {
     imaging::read_metadata(Path::new(&path)).map_err(|e| e.to_string())
 }
 
 /// List the sibling images in `dir` (naturally sorted) plus the index of
 /// `current`, so the frontend can implement previous/next navigation.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_images(dir: String, current: Option<String>) -> Result<DirectoryListing, String> {
     let current = current.map(PathBuf::from);
     imaging::list_directory(Path::new(&dir), current.as_deref()).map_err(|e| e.to_string())
@@ -30,7 +33,7 @@ pub fn list_images(dir: String, current: Option<String>) -> Result<DirectoryList
 ///
 /// Returned as raw bytes (`tauri::ipc::Response`) so the frontend receives an
 /// `ArrayBuffer`, not a base64 string.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_thumbnail(path: String, max_size: Option<u32>) -> Result<tauri::ipc::Response, String> {
     let max = max_size.unwrap_or(256).clamp(16, 4096);
     let bytes = imaging::make_thumbnail(Path::new(&path), max).map_err(|e| e.to_string())?;
@@ -39,7 +42,7 @@ pub fn get_thumbnail(path: String, max_size: Option<u32>) -> Result<tauri::ipc::
 
 /// Raw bytes for the original view. Same payload the `lumina://` protocol
 /// serves; used as a fallback when the protocol is unavailable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_image_bytes(path: String) -> Result<tauri::ipc::Response, String> {
     let (bytes, _mime) = imaging::read_for_display(Path::new(&path)).map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))
@@ -50,7 +53,7 @@ pub fn get_image_bytes(path: String) -> Result<tauri::ipc::Response, String> {
 /// `format` is optional; when omitted the output format is inferred from the
 /// `output_path` extension. `quality` (`1..=100`) only affects JPEG. Returns
 /// the written path.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_image_as(
     input_path: String,
     output_path: String,
@@ -75,7 +78,7 @@ pub fn save_image_as(
 /// Apply an edit (crop / flip / rotate / resize) and write the result to
 /// `output_path`. See [`TransformSpec`] for the field contract and the fixed
 /// operation order (crop → flip → rotate → resize).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn transform_image(
     input_path: String,
     output_path: String,
@@ -88,13 +91,13 @@ pub fn transform_image(
 
 /// Number of pages / frames (GIF, animated WebP, multi-page TIFF). Single
 /// image formats report `1`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_image_pages(path: String) -> Result<u32, String> {
     imaging::page_count(Path::new(&path)).map_err(|e| e.to_string())
 }
 
 /// Extract one page / frame as a PNG (`ArrayBuffer`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_image_frame(path: String, index: u32) -> Result<tauri::ipc::Response, String> {
     let bytes = imaging::read_frame_png(Path::new(&path), index).map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))

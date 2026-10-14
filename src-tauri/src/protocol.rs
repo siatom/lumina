@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use tauri::http::{Request, Response, StatusCode};
+use tauri::{Runtime, UriSchemeContext, UriSchemeResponder};
 
+use crate::cache;
 use crate::imaging;
 
 pub const SCHEME: &str = "lumina";
@@ -32,20 +34,45 @@ pub fn protocol_base() -> String {
     }
 }
 
-/// Protocol handler. Registered once in `lib.rs`.
-pub fn handle<R: tauri::Runtime>(
-    _ctx: tauri::UriSchemeContext<'_, R>,
+/// Protocol handler. Registered once in `lib.rs` via
+/// `register_asynchronous_uri_scheme_protocol`.
+///
+/// The webview invokes the scheme callback on the UI thread, so every read /
+/// decode is pushed onto the async runtime's blocking pool here and the
+/// response is delivered through the [`UriSchemeResponder`] when it is ready.
+/// This keeps large-image reads (`fs::read`) and thumbnail decodes from
+/// freezing the event loop.
+///
+/// `ctx` is a borrow of the `AppHandle`, so it cannot be moved into the
+/// `'static` blocking task; it is unused today (no shared state is needed) and
+/// is dropped at the end of this call.
+pub fn handle<R: Runtime>(
+    _ctx: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
-) -> Response<Cow<'static, [u8]>> {
-    match route(&request) {
-        Ok((bytes, mime)) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", mime)
-            .header("Access-Control-Allow-Origin", "*")
-            .body(Cow::Owned(bytes))
-            .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")),
-        Err(msg) => error_response(StatusCode::BAD_REQUEST, &msg),
-    }
+    responder: UriSchemeResponder,
+) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let response = match route(&request) {
+            Ok((bytes, mime, cacheable)) => {
+                let mut builder = Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", mime)
+                    .header("Access-Control-Allow-Origin", "*");
+                // Only versioned URLs may be cached forever: the frontend puts
+                // `<modified_ms>-<file_size>` in `v`, so a changed file gets a
+                // new URL and a cached entry can never be stale.
+                if cacheable {
+                    builder = builder
+                        .header("Cache-Control", "public, max-age=31536000, immutable");
+                }
+                builder.body(Cow::Owned(bytes)).unwrap_or_else(|_| {
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
+                })
+            }
+            Err(msg) => error_response(StatusCode::BAD_REQUEST, &msg),
+        };
+        responder.respond(response);
+    });
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response<Cow<'static, [u8]>> {
@@ -56,13 +83,18 @@ fn error_response(status: StatusCode, msg: &str) -> Response<Cow<'static, [u8]>>
         .expect("static error response is always valid")
 }
 
-/// Decode a request into `(bytes, mime)`.
-fn route(request: &Request<Vec<u8>>) -> Result<(Vec<u8>, &'static str), String> {
+/// Decode a request into `(bytes, mime, cacheable)`.
+///
+/// `cacheable` is true when the request carried a `v` revision token, i.e. the
+/// URL is content-addressed and safe to cache forever.
+fn route(request: &Request<Vec<u8>>) -> Result<(Vec<u8>, &'static str, bool), String> {
     let query = request.uri().query().unwrap_or("");
     let params = parse_query(query);
 
     let path = params.get("path").ok_or("missing `path` parameter")?;
-    let path = Path::new(path);
+    let path_ref = Path::new(path);
+    let revision = params.get("v");
+    let cacheable = revision.is_some();
 
     match params.get("mode").map(String::as_str).unwrap_or("full") {
         "thumb" => {
@@ -71,10 +103,19 @@ fn route(request: &Request<Vec<u8>>) -> Result<(Vec<u8>, &'static str), String> 
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(256)
                 .clamp(16, 4096);
-            let bytes = imaging::make_thumbnail(path, max).map_err(|e| e.to_string())?;
-            Ok((bytes, "image/png"))
+            // Reuse the revision the frontend already holds (no extra stat);
+            // fall back to reading it off the file.
+            let revision = match revision {
+                Some(v) => v.clone(),
+                None => imaging::revision_of(path_ref),
+            };
+            let bytes = cache::thumbnail_png(path, max, &revision).map_err(|e| e.to_string())?;
+            Ok((bytes.as_ref().clone(), "image/png", cacheable))
         }
-        _ => imaging::read_for_display(path).map_err(|e| e.to_string()),
+        _ => {
+            let (bytes, mime) = imaging::read_for_display(path_ref).map_err(|e| e.to_string())?;
+            Ok((bytes, mime, cacheable))
+        }
     }
 }
 

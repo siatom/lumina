@@ -38,11 +38,13 @@ import {
   pickFolder,
   pickImage,
   pickSavePathFor,
+  protocolBase,
   renameFile,
   saveImageAs,
   transformImage,
   type CropRect,
   type DirectoryListing,
+  type ImageEntry,
   type ImageMetadata,
 } from "./api";
 
@@ -54,6 +56,20 @@ function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`lumina: missing element #${id}`);
   return node as T;
+}
+
+/** Lower-cased extension of a path ("" when it has none). */
+function extOf(path: string): string {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return "";
+  const ext = path.slice(dot + 1);
+  // A dot in a directory name (`C:\my.pics\photo`) must not count.
+  return ext.includes("/") || ext.includes("\\") ? "" : ext.toLowerCase();
+}
+
+/** Cache-busting / cache-key token for a file revision. */
+function versionOf(entry: ImageEntry): string {
+  return `${entry.modified_ms}-${entry.file_size}`;
 }
 
 const stage = el<HTMLElement>("stage");
@@ -196,6 +212,22 @@ function isMultiPage(): boolean {
 
 function clampScale(value: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
+}
+
+/**
+ * Dimensions as the viewer actually renders them.
+ *
+ * `meta.width/height` come from the file header (the *stored* pixel grid), but
+ * the webview applies EXIF orientation itself — so orientations 5–8 (the
+ * 90°/270° turns) swap width and height on screen. Every fit / zoom / crop
+ * computation works in display space, so it must use these, not the raw header
+ * dimensions. The same space is what the backend's `decode_oriented` produces,
+ * which is why crop coordinates line up with `transform_image`.
+ */
+function orientedDims(m: ImageMetadata): { w: number; h: number } {
+  const orientation = m.exif?.orientation ?? 1;
+  const swapped = orientation >= 5 && orientation <= 8;
+  return swapped ? { w: m.height, h: m.width } : { w: m.width, h: m.height };
 }
 
 /** On-screen (post-rotation) dimensions of the image, in image pixels. */
@@ -548,8 +580,15 @@ function renderInfo(m: ImageMetadata): void {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Thumbnail sidebar (lazy, one blob per visible tile)                         */
+/* Thumbnail sidebar (lazy, protocol transport, bounded concurrency)           */
 /* -------------------------------------------------------------------------- */
+
+/** Max thumbnails loading at once, so a fast scroll cannot saturate the CPU. */
+const THUMB_CONCURRENCY = 6;
+
+/** Tiles waiting for a free slot in the loading pool. */
+const thumbQueue: HTMLImageElement[] = [];
+let thumbsInFlight = 0;
 
 const thumbObserver = new IntersectionObserver(
   (entries) => {
@@ -557,21 +596,64 @@ const thumbObserver = new IntersectionObserver(
       if (!entry.isIntersecting) continue;
       const img = entry.target as HTMLImageElement;
       thumbObserver.unobserve(img);
-      void loadThumbnail(img);
+      thumbQueue.push(img);
     }
+    pumpThumbs();
   },
   { root: thumbsTrack, rootMargin: "240px" },
 );
 
+/** Start as many queued tiles as the concurrency budget allows. */
+function pumpThumbs(): void {
+  while (thumbsInFlight < THUMB_CONCURRENCY && thumbQueue.length > 0) {
+    const img = thumbQueue.shift() as HTMLImageElement;
+    thumbsInFlight++;
+    void loadThumbnail(img).finally(() => {
+      thumbsInFlight--;
+      pumpThumbs();
+    });
+  }
+}
+
+/** Set `img.src` and resolve once the image has loaded or failed. */
+function setImgSrc(img: HTMLImageElement, url: string): Promise<void> {
+  return new Promise((resolve) => {
+    img.addEventListener("load", () => resolve(), { once: true });
+    img.addEventListener("error", () => resolve(), { once: true });
+    img.src = url;
+  });
+}
+
+/**
+ * Load one tile through the `lumina://` protocol (streamed by Rust, no IPC
+ * round-trip, no Blob). Falls back to the IPC command once if the protocol is
+ * unavailable, mirroring the main viewer's protocol → blob path.
+ */
 async function loadThumbnail(img: HTMLImageElement): Promise<void> {
   const path = img.dataset.path;
   if (!path) return;
+
+  try {
+    const url = await luminaImageUrl(path, {
+      mode: "thumb",
+      max: 192,
+      version: img.dataset.version,
+    });
+    await setImgSrc(img, url);
+    if (img.naturalWidth > 0) return;
+  } catch {
+    /* fall through to the IPC fallback */
+  }
+
   try {
     const blob = await getThumbnail(path, 192);
     const url = URL.createObjectURL(blob);
-    img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
-    img.addEventListener("error", () => URL.revokeObjectURL(url), { once: true });
-    img.src = url;
+    try {
+      await setImgSrc(img, url);
+      if (img.naturalWidth === 0) throw new Error("thumbnail decode failed");
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   } catch {
     img.closest(".thumb")?.classList.add("thumb-failed");
   }
@@ -592,6 +674,7 @@ function renderThumbs(list: DirectoryListing, active: string): void {
 
     const img = document.createElement("img");
     img.dataset.path = entry.path;
+    img.dataset.version = versionOf(entry);
     img.alt = entry.file_name;
     img.draggable = false;
 
@@ -615,6 +698,7 @@ function clearThumbs(): void {
   thumbsTrack.replaceChildren();
   thumbsCount.textContent = "";
   thumbsRendered = false;
+  thumbQueue.length = 0;
 }
 
 /** Move the highlight without rebuilding the strip (prev/next within a dir). */
@@ -639,6 +723,27 @@ function releaseViewerBlob(): void {
   }
 }
 
+/**
+ * Align `meta` with the bitmap the engine actually decoded.
+ *
+ * The EXIF-derived dimensions are right for every format Lumina renders, but
+ * `naturalWidth`/`naturalHeight` are authoritative — they also cover the paths
+ * where the backend bakes the orientation into the pixels (TIFF transcode,
+ * multi-page frames). Called once per open, after the image loads; a no-op when
+ * the two already agree, which is the normal case.
+ */
+function reconcileViewerDims(): void {
+  if (!meta) return;
+  const w = viewer.naturalWidth;
+  const h = viewer.naturalHeight;
+  if (w <= 0 || h <= 0) return;
+  if (w === meta.width && h === meta.height) return;
+  meta = { ...meta, width: w, height: h };
+  fileDims = { w, h };
+  updateStatus();
+  reflow();
+}
+
 async function openPath(path: string): Promise<void> {
   const token = ++openToken;
 
@@ -651,9 +756,15 @@ async function openPath(path: string): Promise<void> {
   }
   if (token !== openToken) return;
 
-  meta = m;
+  // The webview rotates EXIF-oriented images itself, so `meta` must carry the
+  // *display* dimensions (stored header dims swapped for orientation 5–8) — the
+  // whole view/fit/crop maths, and the backend's `decode_oriented`, share that
+  // space.
+  const dims = orientedDims(m);
+  const oriented: ImageMetadata = { ...m, width: dims.w, height: dims.h };
+  meta = oriented;
   currentPath = m.path;
-  fileDims = { w: m.width, h: m.height };
+  fileDims = { w: dims.w, h: dims.h };
   viewerFellBack = false;
   releaseViewerBlob();
   rotation = 0;
@@ -665,28 +776,50 @@ async function openPath(path: string): Promise<void> {
 
   emptyHint.hidden = true;
   viewer.classList.add("visible");
-  renderInfo(m);
+  renderInfo(oriented);
   updateStatus();
   updateControlsEnabled();
   updatePageControls();
 
-  // GIF / WebP / multi-page TIFF: ask the backend how many frames there are.
-  // Native animated formats keep playing; the page bar only adds frame stepping.
-  try {
-    pageCount = await getImagePages(m.path);
-  } catch {
-    pageCount = 1;
-  }
-  if (token !== openToken) return;
-  updateControlsEnabled();
-  updatePageControls();
-
-  const url = await luminaImageUrl(m.path, { mode: "full" });
+  // Put the image on screen before anything that is not required to show it.
+  const url = await luminaImageUrl(m.path, {
+    mode: "full",
+    version: `${m.modified_ms}-${m.file_size}`,
+  });
   if (token !== openToken) return;
   viewer.src = url;
 
+  // Safety net: the decoded bitmap is authoritative. If the engine's orientation
+  // differs from what the EXIF tag predicted (missing tag, unusual container),
+  // adopt its dimensions and re-fit once the image has loaded.
+  viewer.addEventListener(
+    "load",
+    () => {
+      if (token === openToken) reconcileViewerDims();
+    },
+    { once: true },
+  );
+
   // Fit uses the metadata dimensions, so it does not wait for `load`.
   zoomToFit();
+
+  // Frame count only matters for animated / multi-page containers, and counting
+  // a GIF/WebP decodes every frame — so gate by extension (matching the
+  // backend's `page_count` dispatch) and never await it: the image is already
+  // on screen. Native animated formats keep playing either way.
+  const ext = extOf(m.path);
+  if (ext === "gif" || ext === "webp" || ext === "tif" || ext === "tiff") {
+    void getImagePages(m.path)
+      .then((count) => {
+        if (token !== openToken) return;
+        pageCount = count || 1;
+        updateControlsEnabled();
+        updatePageControls();
+      })
+      .catch(() => {
+        /* leave pageCount at 1 */
+      });
+  }
 
   // Keep a single directory listing; only re-list when the folder changes.
   const dir = parentDir(m.path);
@@ -709,6 +842,51 @@ async function openPath(path: string): Promise<void> {
     else updateThumbActive();
   } else {
     clearThumbs();
+  }
+
+  preloadNeighbours(m.path);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Preloading                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** Keeps preloaded images alive so the webview can reuse their decoded bitmap. */
+const preloadCache = new Map<string, HTMLImageElement>();
+const PRELOAD_MAX = 4;
+
+/**
+ * Warm the neighbours of the open image so prev/next feel instant. The real
+ * gain is the OS page cache plus the backend's own caches; keeping the `Image`
+ * objects referenced additionally lets the webview reuse a decoded bitmap when
+ * the same URL is later assigned to the viewer.
+ */
+function preloadNeighbours(path: string): void {
+  if (!listing) return;
+  const index = listing.entries.findIndex((e) => e.path === path);
+  if (index < 0) return;
+  for (const offset of [1, -1]) {
+    const entry = listing.entries[index + offset];
+    if (entry) void preloadImage(entry);
+  }
+}
+
+async function preloadImage(entry: ImageEntry): Promise<void> {
+  const version = versionOf(entry);
+  const key = `${entry.path}|${version}`;
+  if (preloadCache.has(key)) return;
+
+  const img = new Image();
+  preloadCache.set(key, img);
+  if (preloadCache.size > PRELOAD_MAX) {
+    const oldest = preloadCache.keys().next().value;
+    if (oldest !== undefined) preloadCache.delete(oldest);
+  }
+
+  try {
+    img.src = await luminaImageUrl(entry.path, { mode: "full", version });
+  } catch {
+    preloadCache.delete(key);
   }
 }
 
@@ -1659,6 +1837,9 @@ window.addEventListener("keydown", (event) => {
 
 initTheme();
 setThumbsVisible(true);
+
+// Warm the `lumina://` base URL so the first open does not pay for it.
+void protocolBase();
 setInfoVisible(false);
 updateControlsEnabled();
 updateNavigation();
