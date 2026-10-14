@@ -1,7 +1,7 @@
 # Lumina — IPC 接口规范
 
-> 版本：阶段 2B（多格式支持与图像操作）
-> 状态：已实现并通过 `cargo test`（含真实固件格式矩阵）
+> 版本：阶段 2C-B（EXIF orientation 自动应用修复）
+> 状态：已实现并通过 `cargo test`（含真实固件格式矩阵 + orientation 断言）
 > 前端类型定义见 `src/api.ts`，Rust 实现见 `src-tauri/src/commands.rs`
 
 本文档是前端（Prism）与格式/操作模块（Pixel）共同依赖的稳定契约。修改任何命令签名、类型字段或协议格式前，请先更新本文件与 `src/api.ts`。
@@ -56,7 +56,7 @@
    - 前端在 `<img>` 触发 `error` 时（协议不可用等）自动回退，保证在任何环境下都能显示。
    - 注意：这里返回的是**原始字节**而非 base64，仍然比 base64 方案省 33% 带宽与内存。
 
-> 后续优化方向（阶段 2+）：给 `lumina://` 增加 LRU 解码缓存、按需 `max` 的渐进式降采样（`image` 的 `resize` + 解码器 hint）、以及 EXIF 方向自动应用。
+> 后续优化方向（阶段 2+）：给 `lumina://` 增加 LRU 解码缓存、按需 `max` 的渐进式降采样（`image` 的 `resize` + 解码器 hint）。（EXIF 方向自动应用已在阶段 2C-B 完成，见第 9 节。）
 
 ---
 
@@ -401,7 +401,7 @@ cd src-tauri && cargo test --lib -- --nocapture    # 打印「格式 × 结果�
 ## 8. 已知限制 / 待办
 
 1. 自定义协议**未做解码结果缓存**，同一张图重复请求会重复解码（缩略图有懒加载缓解）。
-2. **EXIF 方向未自动应用**：`orientation` 已暴露，但缩略图/原图尚未按它旋转。WebView 对 JPEG 默认会按 EXIF 旋转，可能与缩略图不一致（`<img>` 与 canvas 行为差异）。→ 阶段 2B 仍未做，列为待办。
+2. ~~EXIF 方向未自动应用~~ → **阶段 2C-B 已修复**，见第 9 节（缩略图/转码路径/转换编辑统一按方向旋转，webview 原生格式走原字节直通避免二次旋转）。
 3. `list_images` 非递归、不分页，超大目录（数万文件）需要虚拟化。
 4. **AVIF / HEIC 解码未支持**，见第 6 节 C；SVG 已支持。
 5. **有损 WebP 编码未支持**（`image` crate 仅无损）。
@@ -409,5 +409,64 @@ cd src-tauri && cargo test --lib -- --nocapture    # 打印「格式 × 结果�
 7. 多页/调色板 TIFF 见第 6 节 C（像素解码不支持 palette/bilevel）。
 8. `transform_image` 每次都是「整图解码 → 编辑 → 编码」，大图会一次性占用较多内存；尚未做流式/分块处理。
 9. 尚未验证的运行时项：`lumina://` 在 Windows WebView2 下的实际加载、`dialog` 权限在生产构建下的行为（阶段 1 已通过编译/单测/前端构建，GUI 冒烟见 README）。
-4. `save_image_as` 无质量/元数据保留参数。
-5. 尚未验证的运行时项：`lumina://` 在 Windows WebView2 下的实际加载、`dialog` 权限在生产构建下的行为（阶段 1 已通过编译/单测/前端构建，GUI 冒烟见 README）。
+
+---
+
+## 9. EXIF orientation 自动应用（阶段 2C-B）
+
+### 9.1 问题
+
+照片（尤其手机竖拍）常把**传感器原始方向**的像素存盘，另在 EXIF `Orientation`（tag 274）里记录「显示时应如何旋转」。若不处理，会出现：缩略图是横的、点开大图却是竖的（或反之）。
+
+### 9.2 关键约束：WebView2 **会**自动应用 orientation
+
+Chromium/Blink 的 `<img>` 默认按 CSS `image-orientation: from-image` 渲染，即**读取 JPEG 的 EXIF Orientation 并自动旋转**，同时 `naturalWidth/naturalHeight` 也随之对调。因此：
+
+- 主视图（`<img src="lumina://...&mode=full">`）对 webview 原生格式**已经是正确方向**。
+- 若 Rust 侧再旋转一次（或在流式直通前重编码旋转），就会**二次旋转**。
+
+**实测取证**（headless Edge / WebView2，Blink `155.0.4283.45`，脚本 `scripts/probe-webview2-orientation.cmd` + `scripts/webview2-probe.html`，固件 `orient{1,6,8}.jpg` 存储 96×64、红色标记在存储左上角）：
+
+```
+FIXTURE orient1.jpg natural=96x64 stored=96x64 axes-swapped=no  red=tl
+FIXTURE orient6.jpg natural=64x96 stored=96x64 axes-swapped=yes red=tr   # 引擎顺时针转 90°
+FIXTURE orient8.jpg natural=64x96 stored=96x64 axes-swapped=yes red=bl   # 引擎顺时针转 270°
+```
+
+结论：**主视图方向由引擎负责；Rust 侧只需保证「非直通」输出与之一致。**
+
+### 9.3 统一策略（`src-tauri/src/imaging.rs`）
+
+| 路径 | 处理 | 原因 |
+| --- | --- | --- |
+| **webview 原生格式**（`WEBVIEW_NATIVE_EXTENSIONS`，含 JPEG/WebP/PNG/GIF/BMP/ICO/SVG）`read_for_display` | **原字节直通，不改** | 引擎会自行旋转；改了就二次旋转 |
+| **缩略图** `make_thumbnail` | `decode` 原始像素 → `thumbnail()` 降采样 → **再** `apply_orientation` | 缩略图是 Rust 重编码的 PNG，无 EXIF，必须自己烘进方向。降采样后再转 90° 的整数倍**无损**（无重采样），且旋转小图更快 |
+| **转码路径** `read_for_display`（非原生，当前 TIFF→PNG） | `decode` → `apply_orientation` → `encode_png` | 输出的 PNG 无 EXIF，引擎无从旋转，必须烘进像素 |
+| **转换 / 编辑** `convert_image` / `transform_image` | 经 `decode_oriented()` 解码（先烘方向）再操作 | 后续 crop/flip/rotate/resize 都在**已定向**坐标系里进行，前后端预览一致；输出不带陈旧 orientation 标签 |
+| **多页/取帧** `read_frame_png` / `tiff_frame` | 取帧后 `apply_orientation`（TIFF 按每页 `Tag::Orientation` 单独读） | 每帧/每页可能各有方向 |
+
+新增内部函数：`exif_orientation(path) -> Option<Orientation>`、`apply_exif_orientation(&mut DynamicImage, path)`、`decode_oriented(path) -> Result<DynamicImage>`。方向应用走 `image::metadata::Orientation` + `DynamicImage::apply_orientation()`（`image` 的解码器**不会**自动应用，需显式调用）。
+
+### 9.4 固件与断言
+
+- `scripts/make-exif.py` 生成 `orient{1,6,8}.jpg`（存储 96×64，存储左上角为红色块）+ `orient6.tiff` / `orient8.tiff`（TIFF baseline tag 274）。
+- `src-tauri/src/format_matrix.rs` 新增 4 个断言用例（`cargo test` 全绿）：
+  - `exif_orientation_thumbnail_matches_webview`：缩略图 48×32/32×48，红角 TL/TR/BL 与 9.2 的探针一致。
+  - `exif_orientation_transcode_applies_before_encode`：`orient6.tiff`/`orient8.tiff` → PNG 64×96，红角 TR/BL。
+  - `webview_native_passthrough_keeps_raw_bytes`：JPEG `mode=full` 返回字节与文件**逐字节相等**（证明未重编码）。
+  - `convert_and_transform_use_oriented_pixels`：`convert_image(orient6.jpg→png)` = 64×96 红角 TR；`transform_image` 裁剪已定向坐标命中标记。
+
+复现：
+
+```bash
+python scripts/make-exif.py                          # 造固件
+src-tauri> cargo test orientation -- --nocapture      # 打印方向断言表
+src-tauri> cargo test --all-targets                   # 全量（21 项）
+```
+
+### 9.5 给 Prism 的注意点
+
+- 主视图继续用 `luminaImageUrl(path, { mode: "full" })` 即可，**方向由引擎处理**，前端无需额外 CSS 旋转。
+- **不要**在前端对原生格式再叠加 `transform: rotate(...)`——会与引擎的自动旋转叠加。
+- 缩略图（`getThumbnail` / `mode=thumb`）与主视图现在方向**一致**，可放心并排显示。
+- 若前端要把图绘到 `<canvas>`（`drawImage`）再处理：canvas 按**原始像素**绘制，**不含** EXIF 自动旋转；需要方向一致时请改用 `getImageFrame`/`transformImage` 的输出（那些是已定向像素）。
