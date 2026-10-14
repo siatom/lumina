@@ -183,13 +183,22 @@ function getThumbnail(path: string, maxSize?: number): Promise<Blob>; // 默认 
 
 Rust 侧返回 `tauri::ipc::Response::new(bytes)`，前端收到 `ArrayBuffer`，`api.ts` 已封装为 `Blob`。
 
-### 4.4 `get_image_bytes`（兜底）
+### 4.4 `getImageBlob`（兜底，Rust 命令 `get_image_bytes`）
+
+前端封装的导出名是 **`getImageBlob`**（返回 `Blob`，不是裸 `ArrayBuffer`）——文档早期误写为 `getImageBytes`。
 
 返回原图字节（与 `lumina://` 的 `mode=full` 语义一致），供协议不可用时回退。
 
 ```ts
-function getImageBytes(path: string): Promise<ArrayBuffer>;
+function getImageBlob(path: string): Promise<Blob>;
 ```
+
+Blob 的 `type` 由**路径扩展名**推导（`api.ts` 的 `imageMimeType`），与 `imaging::mime_for_ext` 及 `WEBVIEW_NATIVE_EXTENSIONS` 保持一致：
+
+- webview 原生格式（`png` / `jpg` / `jpeg` / `gif` / `webp` / `bmp` / `ico` / `svg`）→ 原始字节直传，Blob 标记为对应的 MIME（如 `image/jpeg`、`image/svg+xml`）。
+- 其余格式（当前为 `tif` / `tiff`，以及未知扩展名）→ Rust 已转码为 PNG，Blob 标记为 `image/png`。
+
+> SVG 必须标记为 `image/svg+xml` 才能在 `<img>` 中渲染；早期版本固定写死 `image/png` 属缺陷，已在阶段 4 修复。
 
 ### 4.5 `save_image_as`（转换/另存）
 

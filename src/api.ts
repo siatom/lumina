@@ -85,6 +85,62 @@ export const ENCODABLE_EXTENSIONS = [
 ] as const;
 
 /* -------------------------------------------------------------------------- */
+/* MIME types                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Extensions the backend streams through **verbatim** (mirrors
+ * `imaging::WEBVIEW_NATIVE_EXTENSIONS`). Everything else — currently TIFF — is
+ * decoded and re-encoded to PNG before it reaches us, so its payload must not
+ * be labelled with the source extension.
+ */
+const PASSTHROUGH_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "svg",
+]);
+
+/** Mirrors `imaging::mime_for_ext` in `src-tauri/src/imaging.rs`. */
+const MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+  svg: "image/svg+xml",
+};
+
+/** Lower-cased extension of a path, or "" when it has none. */
+function extensionOf(path: string): string {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return "";
+  const ext = path.slice(dot + 1);
+  // A dot in a directory name (`C:\my.pics\photo`) must not count.
+  if (ext.includes("/") || ext.includes("\\")) return "";
+  return ext.toLowerCase();
+}
+
+/**
+ * MIME type of the bytes {@link getImageBlob} receives for `path`.
+ *
+ * Passthrough formats keep their own type; transcoded ones (TIFF) become PNG.
+ * Getting this right is not cosmetic — an SVG served as `image/png` will not
+ * render in an `<img>`.
+ */
+export function imageMimeType(path: string): string {
+  const ext = extensionOf(path);
+  if (!PASSTHROUGH_EXTENSIONS.has(ext)) return "image/png";
+  return MIME_BY_EXTENSION[ext] ?? "image/png";
+}
+
+/* -------------------------------------------------------------------------- */
 /* Commands                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -101,7 +157,12 @@ export function listImages(dir: string, current?: string): Promise<DirectoryList
   return invoke<DirectoryListing>("list_images", { dir, current: current ?? null });
 }
 
-/** Downscaled PNG thumbnail as a ready-to-use Blob. */
+/**
+ * Downscaled PNG thumbnail as a ready-to-use Blob.
+ *
+ * `image/png` is not an assumption: `imaging::make_thumbnail` always encodes
+ * PNG regardless of the source format.
+ */
 export async function getThumbnail(path: string, maxSize = 256): Promise<Blob> {
   const bytes = await invoke<ArrayBuffer>("get_thumbnail", { path, maxSize });
   return new Blob([bytes], { type: "image/png" });
@@ -110,10 +171,14 @@ export async function getThumbnail(path: string, maxSize = 256): Promise<Blob> {
 /**
  * Original image bytes as a Blob. This is the fallback transport used when the
  * `lumina://` protocol is not available; prefer {@link luminaImageUrl}.
+ *
+ * The payload keeps its real format for webview-native extensions (JPEG stays
+ * JPEG, SVG stays SVG), so the Blob type is derived from the path rather than
+ * hard-coded — see {@link imageMimeType}.
  */
 export async function getImageBlob(path: string): Promise<Blob> {
   const bytes = await invoke<ArrayBuffer>("get_image_bytes", { path });
-  return new Blob([bytes], { type: "image/png" });
+  return new Blob([bytes], { type: imageMimeType(path) });
 }
 
 /**
@@ -181,7 +246,12 @@ export function getImagePages(path: string): Promise<number> {
   return invoke<number>("get_image_pages", { path });
 }
 
-/** One page / frame of an animated or multi-page file, as a PNG Blob. */
+/**
+ * One page / frame of an animated or multi-page file, as a PNG Blob.
+ *
+ * Always PNG: `imaging::read_frame_png` decodes the frame and re-encodes it,
+ * whatever the container format was.
+ */
 export async function getImageFrame(path: string, index: number): Promise<Blob> {
   const bytes = await invoke<ArrayBuffer>("get_image_frame", { path, index });
   return new Blob([bytes], { type: "image/png" });
