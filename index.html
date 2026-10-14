@@ -36,10 +36,10 @@
         <span class="divider"></span>
 
         <div class="tool-group">
-          <button id="btn-rotate-left" title="向左旋转 90° (L / Shift+R)">↺</button>
-          <button id="btn-rotate-right" title="向右旋转 90° (R)">↻</button>
-          <button id="btn-flip-h" title="水平翻转 (H)">⇋</button>
-          <button id="btn-flip-v" title="垂直翻转 (V)">⇅</button>
+          <button id="btn-rotate-left" title="向左旋转 90°（仅预览）(L / Shift+R)">↺</button>
+          <button id="btn-rotate-right" title="向右旋转 90°（仅预览）(R)">↻</button>
+          <button id="btn-flip-h" title="水平翻转（仅预览）(H)">⇋</button>
+          <button id="btn-flip-v" title="垂直翻转（仅预览）(V)">⇅</button>
           <button id="btn-reset-transform" title="重置旋转/翻转 (Shift+0)">重置</button>
         </div>
 
@@ -57,6 +57,35 @@
           </label>
         </div>
 
+        <span class="divider"></span>
+
+        <div class="tool-group">
+          <button id="btn-save-as" title="另存为 / 转换格式 (Ctrl+S)" disabled>另存为</button>
+          <label class="field" title="JPEG 质量（1-100，仅 JPEG 生效）">
+            <select id="quality-select">
+              <option value="60">质量 60</option>
+              <option value="75">质量 75</option>
+              <option value="85" selected>质量 85</option>
+              <option value="92">质量 92</option>
+              <option value="100">质量 100</option>
+            </select>
+          </label>
+          <button id="btn-save-transform" title="把当前旋转/翻转写入新文件（不覆盖原图）" disabled>
+            保存旋转结果
+          </button>
+          <button id="btn-crop" title="进入 / 退出裁剪模式 (C)" disabled>裁剪</button>
+        </div>
+
+        <span class="divider"></span>
+
+        <div class="tool-group">
+          <button id="btn-rename" title="重命名当前文件" disabled>重命名</button>
+          <button id="btn-delete" class="danger" title="删除当前文件（需确认，不可撤销）" disabled>
+            删除
+          </button>
+          <button id="btn-copy-path" title="复制当前文件的完整路径" disabled>复制路径</button>
+        </div>
+
         <span class="spacer"></span>
 
         <div class="tool-group">
@@ -66,6 +95,29 @@
           <button id="btn-fullscreen" title="全屏 (F11)">全屏</button>
         </div>
       </header>
+
+      <div class="page-bar" id="page-bar" hidden>
+        <span class="bar-label">多页 / 动画</span>
+        <button id="btn-page-prev" title="上一页 / 上一帧">‹</button>
+        <span class="page-label" id="page-label">1 / 1</span>
+        <button id="btn-page-next" title="下一页 / 下一帧">›</button>
+        <button id="btn-page-live" title="回到原生动画播放" hidden>▶ 动画</button>
+        <span class="bar-hint" id="page-hint"></span>
+      </div>
+
+      <div class="crop-bar" id="crop-bar" hidden>
+        <span class="bar-label">裁剪（源图坐标 px）</span>
+        <label class="field">x <input id="crop-x" type="number" min="0" step="1" value="0" /></label>
+        <label class="field">y <input id="crop-y" type="number" min="0" step="1" value="0" /></label>
+        <label class="field">宽 <input id="crop-w" type="number" min="1" step="1" value="0" /></label>
+        <label class="field">高 <input id="crop-h" type="number" min="1" step="1" value="0" /></label>
+        <button id="btn-crop-apply" class="primary" disabled>裁剪并另存</button>
+        <button id="btn-crop-clear">清除选区</button>
+        <button id="btn-crop-exit">退出裁剪</button>
+        <span class="bar-hint">
+          在图像上拖拽可框选；旋转/翻转会一并写入输出文件
+        </span>
+      </div>
 
       <div class="workspace">
         <aside class="thumbs" id="thumbs">
@@ -78,7 +130,9 @@
 
         <main class="stage" id="stage">
           <img id="viewer" alt="" draggable="false" />
+          <div class="crop-overlay" id="crop-overlay" hidden></div>
           <p class="empty-hint" id="empty-hint">打开一张图片开始浏览</p>
+          <div class="drop-hint" id="drop-hint" hidden>松开以打开</div>
           <div class="toast" id="toast" hidden></div>
         </main>
 
@@ -99,6 +153,19 @@
         <span class="spacer"></span>
         <span class="status-item" id="status-zoom">100%</span>
       </footer>
+    </div>
+
+    <div class="modal" id="rename-modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+        <h2 class="modal-title" id="rename-title">重命名文件</h2>
+        <p class="modal-sub" id="rename-sub"></p>
+        <input id="rename-input" type="text" spellcheck="false" autocomplete="off" />
+        <p class="modal-error" id="rename-error" hidden></p>
+        <div class="modal-actions">
+          <button id="btn-rename-cancel">取消</button>
+          <button id="btn-rename-confirm" class="primary">确定</button>
+        </div>
+      </div>
     </div>
   </body>
 </html>

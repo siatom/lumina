@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { confirm, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 /* -------------------------------------------------------------------------- */
 /* Types — mirrored 1:1 in docs/INTERFACES.md and in Rust (src-tauri/src).     */
@@ -265,3 +266,58 @@ export async function pickSavePath(
   });
   return typeof selected === "string" ? selected : null;
 }
+
+/**
+ * "Save as" dialog offering several output formats at once.
+ *
+ * Unlike {@link pickSavePath} the user can retarget the output format by
+ * changing the extension; the backend infers `format` from the written path
+ * when `transformImage` / `saveImageAs` omit it.
+ */
+export async function pickSavePathFor(
+  defaultPath: string,
+  extensions: readonly string[],
+): Promise<string | null> {
+  const exts = extensions.length > 0 ? [...extensions] : ["png"];
+  const selected = await saveDialog({
+    defaultPath,
+    filters: [{ name: "图片", extensions: exts }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+/**
+ * Native confirmation dialog (`Yes`/`No`).
+ *
+ * Used before irreversible actions such as deleting a file. Backed by the
+ * `message` command, which `dialog:default` already permits.
+ */
+export async function confirmAction(message: string, title = "Lumina"): Promise<boolean> {
+  return confirm(message, { title, kind: "warning" });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Native drag & drop                                                          */
+/* -------------------------------------------------------------------------- */
+
+export type DropPhase = "enter" | "over" | "drop" | "leave";
+
+/**
+ * Subscribe to native file drag & drop over the current webview.
+ *
+ * Resolves to an unsubscribe function. `paths` is only populated for `enter`
+ * and `drop`; the other phases just report cursor movement.
+ */
+export async function onFileDrop(
+  handler: (phase: DropPhase, paths: string[]) => void,
+): Promise<() => void> {
+  return getCurrentWebview().onDragDropEvent((event) => {
+    const payload = event.payload;
+    if (payload.type === "enter" || payload.type === "drop") {
+      handler(payload.type, payload.paths);
+    } else {
+      handler(payload.type, []);
+    }
+  });
+}
+

@@ -5,23 +5,43 @@
  * the whole frontend. It layers a full ImageGlass-style shell on top of the
  * stage-1 vertical slice — zoom/pan, fit/1:1, prev/next, thumbnails — and adds
  * a toolbar, a thumbnail sidebar, a status bar, slideshow, fullscreen, a
- * dark/light theme and keyboard shortcuts.
+ * dark/light theme, keyboard shortcuts, and the stage-2B editing entry points
+ * (save-as, save-rotation, crop, page navigation, rename/delete/copy-path).
  *
  * Transport / performance: the original image is streamed through the
  * `lumina://` protocol (`luminaImageUrl`) and falls back to `getImageBlob` on
  * `error`. Thumbnails are fetched lazily, one downscaled PNG per visible tile,
  * and every object URL is revoked on load/error so the webview's memory does
- * not grow with the directory size.
+ * not grow with the directory size. Multi-page frames arrive as one PNG blob
+ * at a time and reuse the same revoke path.
+ *
+ * Editing model: rotate/flip/crop are **previewed** with a CSS transform and
+ * only written to disk through `transformImage`, which applies
+ * `crop → flip → rotate → resize`. The preview below composes the same
+ * operations in the same order, so what you see is what gets written.
  */
 
 import {
+  ENCODABLE_EXTENSIONS,
+  SUPPORTED_EXTENSIONS,
+  confirmAction,
+  copyPathToClipboard,
+  deleteFile,
   getImageBlob,
+  getImageFrame,
   getImageMetadata,
+  getImagePages,
   getThumbnail,
   listImages,
   luminaImageUrl,
+  onFileDrop,
   pickFolder,
   pickImage,
+  pickSavePathFor,
+  renameFile,
+  saveImageAs,
+  transformImage,
+  type CropRect,
   type DirectoryListing,
   type ImageMetadata,
 } from "./api";
@@ -40,6 +60,8 @@ const stage = el<HTMLElement>("stage");
 const viewer = el<HTMLImageElement>("viewer");
 const emptyHint = el<HTMLElement>("empty-hint");
 const toast = el<HTMLElement>("toast");
+const cropOverlay = el<HTMLElement>("crop-overlay");
+const dropHint = el<HTMLElement>("drop-hint");
 
 const thumbs = el<HTMLElement>("thumbs");
 const thumbsTrack = el<HTMLElement>("thumbs-track");
@@ -54,6 +76,21 @@ const statusFormat = el<HTMLElement>("status-format");
 const statusIndex = el<HTMLElement>("status-index");
 const statusZoom = el<HTMLElement>("status-zoom");
 const zoomLabel = el<HTMLButtonElement>("zoom-label");
+
+const pageBar = el<HTMLElement>("page-bar");
+const pageLabel = el<HTMLElement>("page-label");
+const pageHint = el<HTMLElement>("page-hint");
+
+const cropBar = el<HTMLElement>("crop-bar");
+const cropX = el<HTMLInputElement>("crop-x");
+const cropY = el<HTMLInputElement>("crop-y");
+const cropW = el<HTMLInputElement>("crop-w");
+const cropH = el<HTMLInputElement>("crop-h");
+
+const renameModal = el<HTMLElement>("rename-modal");
+const renameInput = el<HTMLInputElement>("rename-input");
+const renameSub = el<HTMLElement>("rename-sub");
+const renameError = el<HTMLElement>("rename-error");
 
 const btnOpen = el<HTMLButtonElement>("btn-open");
 const btnOpenFolder = el<HTMLButtonElement>("btn-open-folder");
@@ -70,10 +107,25 @@ const btnFlipV = el<HTMLButtonElement>("btn-flip-v");
 const btnResetTransform = el<HTMLButtonElement>("btn-reset-transform");
 const btnSlideshow = el<HTMLButtonElement>("btn-slideshow");
 const slideshowInterval = el<HTMLSelectElement>("slideshow-interval");
+const btnSaveAs = el<HTMLButtonElement>("btn-save-as");
+const qualitySelect = el<HTMLSelectElement>("quality-select");
+const btnSaveTransform = el<HTMLButtonElement>("btn-save-transform");
+const btnCrop = el<HTMLButtonElement>("btn-crop");
+const btnCropApply = el<HTMLButtonElement>("btn-crop-apply");
+const btnCropClear = el<HTMLButtonElement>("btn-crop-clear");
+const btnCropExit = el<HTMLButtonElement>("btn-crop-exit");
+const btnRename = el<HTMLButtonElement>("btn-rename");
+const btnDelete = el<HTMLButtonElement>("btn-delete");
+const btnCopyPath = el<HTMLButtonElement>("btn-copy-path");
+const btnPagePrev = el<HTMLButtonElement>("btn-page-prev");
+const btnPageNext = el<HTMLButtonElement>("btn-page-next");
+const btnPageLive = el<HTMLButtonElement>("btn-page-live");
 const btnThumbs = el<HTMLButtonElement>("btn-thumbs");
 const btnInfo = el<HTMLButtonElement>("btn-info");
 const btnTheme = el<HTMLButtonElement>("btn-theme");
 const btnFullscreen = el<HTMLButtonElement>("btn-fullscreen");
+const btnRenameCancel = el<HTMLButtonElement>("btn-rename-cancel");
+const btnRenameConfirm = el<HTMLButtonElement>("btn-rename-confirm");
 
 /* -------------------------------------------------------------------------- */
 /* State                                                                       */
@@ -111,6 +163,33 @@ let infoVisible = false;
 /** Monotonic token so a slow open cannot overwrite a newer one. */
 let openToken = 0;
 
+/** Pages / frames of the current file, and the page being shown (null = native). */
+let pageCount = 1;
+let pageIndex: number | null = null;
+/** Monotonic token for page switches, mirroring {@link openToken}. */
+let pageToken = 0;
+/**
+ * Page-0 dimensions of the open file. `meta` is temporarily mutated to the
+ * dimensions of whichever frame is on screen, so this is what restores the
+ * file-level view when returning to the native pipeline.
+ */
+let fileDims: { w: number; h: number } | null = null;
+
+/** Crop mode + the current selection in *source* pixel coordinates. */
+let cropActive = false;
+
+/** True while the rename modal is open; suppresses file-switch shortcuts. */
+let renaming = false;
+
+/** JPEG quality for save-as / transform, shared by both entry points. */
+function quality(): number {
+  return Number(qualitySelect.value) || 85;
+}
+
+function isMultiPage(): boolean {
+  return pageCount > 1;
+}
+
 /* -------------------------------------------------------------------------- */
 /* View transform                                                              */
 /* -------------------------------------------------------------------------- */
@@ -126,7 +205,7 @@ function viewDims(m: ImageMetadata): { w: number; h: number } {
 }
 
 /**
- * Compose the CSS transform for the current view.
+ * Translate offset of the CSS transform matrix for the current view.
  *
  * Model: an image point `p` maps to `t + s·(c + R(θ)·F·(p − c))`, where `c` is
  * the image center, `F` the flip signs and `R` the rotation — i.e. zoom and
@@ -134,29 +213,64 @@ function viewDims(m: ImageMetadata): { w: number; h: number } {
  * right-to-left, so `translate(O) rotate(θ) scale(s·fh, s·fv)` realises it with
  * `O = t + s·c − R·F·(s·c)`.
  */
+function origin(): { ox: number; oy: number } {
+  if (!meta) return { ox: tx, oy: ty };
+  const cx = meta.width / 2;
+  const cy = meta.height / 2;
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  // R(θ) · (s·F·c)
+  const a = scale * (flipH ? -1 : 1) * cx;
+  const b = scale * (flipV ? -1 : 1) * cy;
+  return {
+    ox: tx + scale * cx - (a * cos - b * sin),
+    oy: ty + scale * cy - (a * sin + b * cos),
+  };
+}
+
 function applyTransform(): void {
   if (meta) {
-    const s = scale;
-    const cx = meta.width / 2;
-    const cy = meta.height / 2;
+    const { ox, oy } = origin();
     const fh = flipH ? -1 : 1;
     const fv = flipV ? -1 : 1;
-    const rad = (rotation * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    // R(θ) · (s·F·c)
-    const a = s * fh * cx;
-    const b = s * fv * cy;
-    const rotatedX = a * cos - b * sin;
-    const rotatedY = a * sin + b * cos;
-    const ox = tx + s * cx - rotatedX;
-    const oy = ty + s * cy - rotatedY;
     viewer.style.transform =
-      `translate(${ox}px, ${oy}px) rotate(${rotation}deg) scale(${s * fh}, ${s * fv})`;
+      `translate(${ox}px, ${oy}px) rotate(${rotation}deg) scale(${scale * fh}, ${scale * fv})`;
   }
   const label = `${Math.round(scale * 100)}%`;
   zoomLabel.textContent = label;
   statusZoom.textContent = label;
+}
+
+/**
+ * Stage-relative → image-pixel mapping (the inverse of {@link applyTransform}).
+ *
+ * Both directions are exact for the transforms Lumina previews (quarter turns
+ * and flips map axis-aligned rectangles onto axis-aligned rectangles), which is
+ * what lets the crop selection convert cleanly into source coordinates.
+ */
+function imageToStage(px: number, py: number): { x: number; y: number } {
+  const { ox, oy } = origin();
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const ax = scale * (flipH ? -1 : 1) * px;
+  const ay = scale * (flipV ? -1 : 1) * py;
+  return { x: ox + ax * cos - ay * sin, y: oy + ax * sin + ay * cos };
+}
+
+function stageToImage(sx: number, sy: number): { x: number; y: number } {
+  const { ox, oy } = origin();
+  const rad = (-rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = sx - ox;
+  const dy = sy - oy;
+  // R(−θ) · d, then undo the zoom + flip scale on each axis.
+  return {
+    x: (dx * cos - dy * sin) / (scale * (flipH ? -1 : 1)),
+    y: (dx * sin + dy * cos) / (scale * (flipV ? -1 : 1)),
+  };
 }
 
 /** Scale that fits the whole (rotated) image inside the stage, never upscaling. */
@@ -169,11 +283,18 @@ function fitScale(): number {
   return clampScale(Math.min(s, 1));
 }
 
+/**
+ * Center the *rotated* image in the stage.
+ *
+ * The image center maps to `t + s·c`, so putting it at the stage center only
+ * needs `t = rect/2 − s·c` — which is also correct for 90°/270° turns, where
+ * the on-screen bounding box is height×width rather than width×height.
+ */
 function centerImage(): void {
   if (!meta) return;
   const rect = stage.getBoundingClientRect();
-  tx = (rect.width - scale * meta.width) / 2;
-  ty = (rect.height - scale * meta.height) / 2;
+  tx = rect.width / 2 - scale * (meta.width / 2);
+  ty = rect.height / 2 - scale * (meta.height / 2);
   applyTransform();
 }
 
@@ -182,6 +303,7 @@ function zoomToFit(): void {
   scale = fitScale();
   fitActive = true;
   centerImage();
+  if (cropActive) syncCropOverlay();
 }
 
 function zoomToActual(): void {
@@ -189,6 +311,7 @@ function zoomToActual(): void {
   scale = 1;
   fitActive = false;
   centerImage();
+  if (cropActive) syncCropOverlay();
 }
 
 /** Zoom by `factor`, keeping the stage-relative point (sx, sy) fixed. */
@@ -202,6 +325,7 @@ function zoomAt(factor: number, sx: number, sy: number): void {
   scale = next;
   fitActive = false;
   applyTransform();
+  if (cropActive) syncCropOverlay();
 }
 
 function zoomAtCenter(factor: number): void {
@@ -213,6 +337,8 @@ function zoomAtCenter(factor: number): void {
 function reflow(): void {
   if (fitActive) zoomToFit();
   else centerImage();
+  if (cropActive) syncCropOverlay();
+  updateTransformDependentControls();
 }
 
 function rotateBy(delta: number): void {
@@ -304,6 +430,22 @@ function updateStatus(): void {
     total === 0 ? "—" : index >= 0 ? `${index + 1} / ${total}` : `– / ${total}`;
 }
 
+/** True when the transform preview has something worth writing to disk. */
+function hasPendingTransform(): boolean {
+  return rotation !== 0 || flipH || flipV;
+}
+
+function updateTransformDependentControls(): void {
+  const pending = meta !== null && hasPendingTransform();
+  btnResetTransform.disabled = !pending;
+  // Multi-page files would only ever transform page 0 (decode() reads the first
+  // page), so the entry point is disabled instead of silently dropping frames.
+  btnSaveTransform.disabled = !pending || isMultiPage();
+  btnSaveTransform.title = isMultiPage()
+    ? "多页 / 动图暂不支持写入变换结果（后端只处理第一页）"
+    : "把当前旋转/翻转写入新文件（不覆盖原图）";
+}
+
 function updateControlsEnabled(): void {
   const on = meta !== null;
   for (const button of [
@@ -315,12 +457,26 @@ function updateControlsEnabled(): void {
     btnRotateRight,
     btnFlipH,
     btnFlipV,
-    btnResetTransform,
     btnSlideshow,
     zoomLabel,
+    btnSaveAs,
+    btnRename,
+    btnDelete,
+    btnCopyPath,
   ]) {
     button.disabled = !on;
   }
+
+  btnCrop.disabled = !on || isMultiPage();
+  btnCrop.title = isMultiPage()
+    ? "多页 / 动图暂不支持裁剪（后端只处理第一页）"
+    : "进入 / 退出裁剪模式 (C)";
+  btnSaveAs.title = isMultiPage()
+    ? "另存为 / 转换格式（多页 / 动图仅写入第一页）(Ctrl+S)"
+    : "另存为 / 转换格式 (Ctrl+S)";
+
+  updateTransformDependentControls();
+  updateCropControls();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -344,6 +500,15 @@ function addInfoSub(title: string): void {
   infoList.append(div);
 }
 
+/** Decimal degrees with a hemisphere suffix, e.g. `31.230416° N`. */
+function formatLatitude(value: number): string {
+  return `${Math.abs(value).toFixed(6)}° ${value >= 0 ? "N" : "S"}`;
+}
+
+function formatLongitude(value: number): string {
+  return `${Math.abs(value).toFixed(6)}° ${value >= 0 ? "E" : "W"}`;
+}
+
 function renderInfo(m: ImageMetadata): void {
   infoList.replaceChildren();
   addInfoRow("文件名", m.file_name);
@@ -353,15 +518,32 @@ function renderInfo(m: ImageMetadata): void {
   addInfoRow("路径", m.path);
 
   const e = m.exif;
-  if (e) {
-    addInfoSub("EXIF");
-    addInfoRow("相机", [e.make, e.model].filter(Boolean).join(" ") || null);
-    addInfoRow("拍摄时间", e.datetime);
-    addInfoRow("曝光时间", e.exposure_time);
-    addInfoRow("光圈", e.f_number);
-    addInfoRow("ISO", e.iso);
-    addInfoRow("焦距", e.focal_length);
-    addInfoRow("方向", e.orientation != null ? String(e.orientation) : null);
+  if (!e) return;
+
+  addInfoSub("EXIF");
+  addInfoRow("相机", [e.make, e.model].filter(Boolean).join(" ") || null);
+  addInfoRow("镜头", e.lens_model);
+  addInfoRow("拍摄时间", e.datetime);
+  addInfoRow("曝光时间", e.exposure_time);
+  addInfoRow("光圈", e.f_number);
+  addInfoRow("ISO", e.iso);
+  addInfoRow("焦距", e.focal_length);
+  addInfoRow("方向", e.orientation != null ? String(e.orientation) : null);
+  addInfoRow("作者", e.artist);
+  addInfoRow("版权", e.copyright);
+  addInfoRow("描述", e.description);
+  addInfoRow("软件", e.software);
+
+  const hasGps =
+    e.gps_latitude !== null || e.gps_longitude !== null || e.gps_altitude !== null;
+  if (hasGps) {
+    addInfoSub("位置");
+    addInfoRow("纬度", e.gps_latitude !== null ? formatLatitude(e.gps_latitude) : null);
+    addInfoRow("经度", e.gps_longitude !== null ? formatLongitude(e.gps_longitude) : null);
+    addInfoRow(
+      "海拔",
+      e.gps_altitude !== null ? `${e.gps_altitude.toFixed(1)} m` : null,
+    );
   }
 }
 
@@ -471,17 +653,33 @@ async function openPath(path: string): Promise<void> {
 
   meta = m;
   currentPath = m.path;
+  fileDims = { w: m.width, h: m.height };
   viewerFellBack = false;
   releaseViewerBlob();
   rotation = 0;
   flipH = false;
   flipV = false;
+  pageCount = 1;
+  pageIndex = null;
+  setCropMode(false);
 
   emptyHint.hidden = true;
   viewer.classList.add("visible");
   renderInfo(m);
   updateStatus();
   updateControlsEnabled();
+  updatePageControls();
+
+  // GIF / WebP / multi-page TIFF: ask the backend how many frames there are.
+  // Native animated formats keep playing; the page bar only adds frame stepping.
+  try {
+    pageCount = await getImagePages(m.path);
+  } catch {
+    pageCount = 1;
+  }
+  if (token !== openToken) return;
+  updateControlsEnabled();
+  updatePageControls();
 
   const url = await luminaImageUrl(m.path, { mode: "full" });
   if (token !== openToken) return;
@@ -556,6 +754,472 @@ function jumpTo(index: number): void {
   const i = index < 0 ? listing.entries.length - 1 : index;
   const entry = listing.entries[i];
   if (entry) void openPath(entry.path);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Output helpers (save-as / transform)                                        */
+/* -------------------------------------------------------------------------- */
+
+const ENCODABLE: readonly string[] = ENCODABLE_EXTENSIONS;
+
+function baseName(path: string): string {
+  const sep = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return sep >= 0 ? path.slice(sep + 1) : path;
+}
+
+function joinPath(dir: string, name: string): string {
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+}
+
+/** Output extension for a source image, falling back to PNG when unencodable. */
+function encodableExt(m: ImageMetadata): string {
+  const ext = m.format.toLowerCase();
+  return ENCODABLE.includes(ext) ? ext : "png";
+}
+
+/** Default "save as" target: sibling of the source, same format, suffixed. */
+function defaultOutputPath(m: ImageMetadata, suffix: string): string {
+  const dir = parentDir(m.path);
+  const stem = baseName(m.path).replace(/\.[^.]+$/, "");
+  return joinPath(dir, `${stem}${suffix}.${encodableExt(m)}`);
+}
+
+/** Another image (not the one currently displayed) may be the output path. */
+function warnIfOutputIsSource(outputPath: string): boolean {
+  if (meta === null || outputPath.toLowerCase() !== meta.path.toLowerCase()) return false;
+  showToast("输出路径与原文件相同，已取消以免覆盖原图");
+  return true;
+}
+
+/** 另存为 / 格式转换（不改几何）。Output goes through the file dialog. */
+async function saveAs(): Promise<void> {
+  if (!meta) return;
+  const out = await pickSavePathFor(defaultOutputPath(meta, "_另存"), ENCODABLE);
+  if (!out || warnIfOutputIsSource(out)) return;
+  try {
+    const written = await saveImageAs(meta.path, out, undefined, quality());
+    showToast(`已另存为 ${baseName(written)}`);
+  } catch (err) {
+    showToast(`另存失败：${String(err)}`);
+  }
+}
+
+/**
+ * Write the current rotate/flip preview to a new file.
+ *
+ * The preview and the backend both apply `crop → flip → rotate`, so the written
+ * image matches what is on screen. The source file is never overwritten.
+ */
+async function saveTransformResult(): Promise<void> {
+  if (!meta || !hasPendingTransform()) return;
+  const out = await pickSavePathFor(defaultOutputPath(meta, "_变换"), ENCODABLE);
+  if (!out || warnIfOutputIsSource(out)) return;
+  try {
+    const written = await transformImage(meta.path, out, {
+      rotate: rotation,
+      flipHorizontal: flipH,
+      flipVertical: flipV,
+      quality: quality(),
+    });
+    showToast(`已保存变换结果：${baseName(written)}`);
+  } catch (err) {
+    showToast(`保存失败：${String(err)}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Crop                                                                        */
+/* -------------------------------------------------------------------------- */
+
+function readCropInputs(): CropRect | null {
+  const x = Number(cropX.value);
+  const y = Number(cropY.value);
+  const width = Number(cropW.value);
+  const height = Number(cropH.value);
+  if (![x, y, width, height].every((n) => Number.isFinite(n))) return null;
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
+/** Selection clamped to the image; null when it is empty or out of bounds. */
+function validateCrop(): CropRect | null {
+  if (!meta) return null;
+  const r = readCropInputs();
+  if (!r) return null;
+  if (r.width < 1 || r.height < 1) return null;
+  if (r.x < 0 || r.y < 0 || r.x >= meta.width || r.y >= meta.height) return null;
+  return {
+    x: r.x,
+    y: r.y,
+    width: Math.min(r.width, meta.width - r.x),
+    height: Math.min(r.height, meta.height - r.y),
+  };
+}
+
+/**
+ * Redraw the selection box from the numeric inputs.
+ *
+ * Quarter turns and flips map axis-aligned source rectangles onto axis-aligned
+ * screen rectangles, so transforming the four corners and taking the bounding
+ * box is exact rather than an approximation.
+ */
+function syncCropOverlay(): void {
+  if (!cropActive || !meta) {
+    cropOverlay.hidden = true;
+    return;
+  }
+  const r = readCropInputs();
+  if (!r || r.width < 1 || r.height < 1) {
+    cropOverlay.hidden = true;
+    return;
+  }
+  const corners = [
+    imageToStage(r.x, r.y),
+    imageToStage(r.x + r.width, r.y),
+    imageToStage(r.x, r.y + r.height),
+    imageToStage(r.x + r.width, r.y + r.height),
+  ];
+  const xs = corners.map((c) => c.x);
+  const ys = corners.map((c) => c.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  const right = Math.max(...xs);
+  const bottom = Math.max(...ys);
+
+  cropOverlay.style.left = `${left}px`;
+  cropOverlay.style.top = `${top}px`;
+  cropOverlay.style.width = `${right - left}px`;
+  cropOverlay.style.height = `${bottom - top}px`;
+  cropOverlay.hidden = false;
+}
+
+function setCropRect(rect: CropRect | null): void {
+  if (rect) {
+    cropX.value = String(rect.x);
+    cropY.value = String(rect.y);
+    cropW.value = String(rect.width);
+    cropH.value = String(rect.height);
+  } else {
+    cropX.value = "0";
+    cropY.value = "0";
+    cropW.value = "0";
+    cropH.value = "0";
+  }
+  syncCropOverlay();
+  updateCropControls();
+}
+
+/** Screen-space (stage-relative) rect → clamped source-image rect. */
+function cropRectFromStage(a: { x: number; y: number }, b: { x: number; y: number }): CropRect | null {
+  if (!meta) return null;
+  const p = stageToImage(a.x, a.y);
+  const q = stageToImage(b.x, b.y);
+  const x = Math.round(Math.min(p.x, q.x));
+  const y = Math.round(Math.min(p.y, q.y));
+  const right = Math.round(Math.max(p.x, q.x));
+  const bottom = Math.round(Math.max(p.y, q.y));
+
+  const cx = Math.min(Math.max(x, 0), meta.width);
+  const cy = Math.min(Math.max(y, 0), meta.height);
+  const width = Math.min(right, meta.width) - cx;
+  const height = Math.min(bottom, meta.height) - cy;
+  if (width < 1 || height < 1) return null;
+  return { x: cx, y: cy, width, height };
+}
+
+function updateCropControls(): void {
+  btnCrop.setAttribute("aria-pressed", cropActive ? "true" : "false");
+  btnCropApply.disabled = !cropActive || validateCrop() === null;
+}
+
+function setCropMode(on: boolean): void {
+  cropActive = on && meta !== null;
+  cropBar.hidden = !cropActive;
+  stage.classList.toggle("cropping", cropActive);
+  if (cropActive) setCropRect(null);
+  else cropOverlay.hidden = true;
+  updateCropControls();
+}
+
+/** Crop the selection (plus any pending rotate/flip) into a new file. */
+async function applyCrop(): Promise<void> {
+  if (!meta || !cropActive) return;
+  const rect = validateCrop();
+  if (!rect) {
+    showToast("裁剪区域无效：请先在图像上框选，或填写有效的源图坐标");
+    return;
+  }
+  const out = await pickSavePathFor(defaultOutputPath(meta, "_裁剪"), ENCODABLE);
+  if (!out || warnIfOutputIsSource(out)) return;
+  try {
+    const written = await transformImage(meta.path, out, {
+      crop: rect,
+      rotate: rotation,
+      flipHorizontal: flipH,
+      flipVertical: flipV,
+      quality: quality(),
+    });
+    showToast(`裁剪结果已保存：${baseName(written)}`);
+  } catch (err) {
+    showToast(`裁剪失败：${String(err)}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Multi-page / animation navigation                                           */
+/* -------------------------------------------------------------------------- */
+
+function isAnimatedFormat(m: ImageMetadata): boolean {
+  const f = m.format.toLowerCase();
+  return f === "gif" || f === "webp";
+}
+
+function updatePageControls(): void {
+  const multi = isMultiPage() && meta !== null;
+  pageBar.hidden = !multi;
+  if (!multi || !meta) return;
+
+  const shown = pageIndex ?? 0;
+  pageLabel.textContent = `${shown + 1} / ${pageCount}`;
+  btnPagePrev.disabled = shown <= 0;
+  btnPageNext.disabled = shown >= pageCount - 1;
+
+  const animated = isAnimatedFormat(meta);
+  btnPageLive.hidden = !animated;
+  pageHint.textContent = animated
+    ? pageIndex === null
+      ? "正在播放动画（原生）"
+      : "已切换到静态帧"
+    : "多页 TIFF：逐页查看";
+}
+
+/**
+ * Show one frame as a PNG blob.
+ *
+ * Native formats keep animating through `lumina://`; this is the "pause / step"
+ * path. The blob replaces whatever the viewer was showing, so it reuses the
+ * same revoke slot and the same error guard.
+ */
+async function gotoPage(index: number): Promise<void> {
+  if (!meta || !currentPath || !isMultiPage()) return;
+  const i = Math.max(0, Math.min(pageCount - 1, index));
+  const token = ++pageToken;
+  pageIndex = i;
+  updatePageControls();
+
+  try {
+    const blob = await getImageFrame(currentPath, i);
+    if (token !== pageToken || !currentPath) return;
+
+    // Frames can differ in size from page 0, so sync the view maths to the
+    // frame that is actually on screen before fitting it.
+    let w = 0;
+    let h = 0;
+    try {
+      const bitmap = await createImageBitmap(blob);
+      w = bitmap.width;
+      h = bitmap.height;
+      bitmap.close();
+    } catch {
+      /* keep the metadata dimensions if the bitmap cannot be decoded */
+    }
+    if (w > 0 && h > 0) meta = { ...meta, width: w, height: h };
+    if (token !== pageToken) return;
+
+    viewerFellBack = false;
+    releaseViewerBlob();
+    viewerBlobUrl = URL.createObjectURL(blob);
+    viewer.src = viewerBlobUrl;
+    updateStatus();
+    reflow();
+  } catch (err) {
+    if (token !== pageToken) return;
+    showToast(`无法读取第 ${i + 1} 页：${String(err)}`);
+    pageIndex = null;
+    updatePageControls();
+  }
+}
+
+/** Return to the native pipeline (animated GIF/WebP plays again). */
+async function showLiveFrame(): Promise<void> {
+  if (!meta || !currentPath) return;
+  pageToken += 1;
+  pageIndex = null;
+  updatePageControls();
+  if (fileDims) meta = { ...meta, width: fileDims.w, height: fileDims.h };
+  viewerFellBack = false;
+  releaseViewerBlob();
+  viewer.src = await luminaImageUrl(currentPath, { mode: "full" });
+  updateStatus();
+  reflow();
+}
+
+/* -------------------------------------------------------------------------- */
+/* File operations                                                             */
+/* -------------------------------------------------------------------------- */
+
+let renameTarget: string | null = null;
+
+function showRenameError(text: string): void {
+  renameError.textContent = text;
+  renameError.hidden = false;
+}
+
+function openRenameModal(path: string): void {
+  renaming = true;
+  renameTarget = path;
+  renameInput.value = baseName(path);
+  renameSub.textContent = path;
+  renameError.hidden = true;
+  renameError.textContent = "";
+  renameModal.hidden = false;
+  renameInput.focus();
+  renameInput.select();
+}
+
+function closeRenameModal(): void {
+  renaming = false;
+  renameTarget = null;
+  renameModal.hidden = true;
+}
+
+async function submitRename(): Promise<void> {
+  if (!renameTarget) return;
+  const from = renameTarget;
+  const next = renameInput.value.trim();
+  if (!next) {
+    showRenameError("文件名不能为空");
+    return;
+  }
+  if (next === baseName(from)) {
+    closeRenameModal();
+    return;
+  }
+  btnRenameConfirm.disabled = true;
+  try {
+    const renamed = await renameFile(from, next);
+    closeRenameModal();
+    showToast(`已重命名为 ${baseName(renamed)}`);
+    // The renamed path is not in the cached listing, so openPath re-lists.
+    await openPath(renamed);
+  } catch (err) {
+    showRenameError(String(err));
+  } finally {
+    btnRenameConfirm.disabled = false;
+  }
+}
+
+/** Clear every per-file bit of state and show the placeholder again. */
+function resetViewerState(message: string): void {
+  stopSlideshow();
+  releaseViewerBlob();
+  meta = null;
+  currentPath = null;
+  rotation = 0;
+  flipH = false;
+  flipV = false;
+  pageCount = 1;
+  pageIndex = null;
+  fileDims = null;
+  setCropMode(false);
+  viewer.removeAttribute("src");
+  showPlaceholder(message);
+  clearThumbs();
+  updateStatus();
+  updateNavigation();
+  updateControlsEnabled();
+  updatePageControls();
+}
+
+/** Delete the open file after an explicit confirmation. */
+async function removeCurrent(): Promise<void> {
+  if (!meta || !currentPath) return;
+  const path = currentPath;
+  const name = meta.file_name;
+  const ok = await confirmAction(
+    `确定要删除“${name}”吗？\n\n此操作不可撤销，文件不会被移入回收站。`,
+    "删除文件",
+  );
+  if (!ok) return;
+
+  stopSlideshow();
+  try {
+    await deleteFile(path);
+  } catch (err) {
+    showToast(`删除失败：${String(err)}`);
+    return;
+  }
+  showToast(`已删除 ${name}`);
+
+  const entries = listing?.entries;
+  if (entries) {
+    const index = entries.findIndex((e) => e.path === path);
+    if (index >= 0) entries.splice(index, 1);
+    thumbsRendered = false;
+    if (entries.length > 0) {
+      const next = entries[Math.min(Math.max(index, 0), entries.length - 1)];
+      await openPath(next.path);
+      return;
+    }
+  }
+  resetViewerState(`已删除“${name}”，目录内没有更多图片`);
+}
+
+async function copyCurrentPath(): Promise<void> {
+  if (!currentPath) return;
+  try {
+    await copyPathToClipboard(currentPath);
+    showToast("已复制文件路径");
+  } catch (err) {
+    showToast(`复制失败：${String(err)}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Native drag & drop                                                          */
+/* -------------------------------------------------------------------------- */
+
+function isSupportedImage(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return false;
+  const ext = path.slice(dot + 1).toLowerCase();
+  return (SUPPORTED_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+function setDropHint(visible: boolean): void {
+  stage.classList.toggle("drop-target", visible);
+  dropHint.hidden = !visible;
+}
+
+async function handleDroppedPath(path: string): Promise<void> {
+  if (isSupportedImage(path)) {
+    await openPath(path);
+    return;
+  }
+  // Not a known image extension — assume a folder and let the backend decide
+  // (openDirectory reports a readable error when it is neither).
+  await openDirectory(path);
+}
+
+function wireDragAndDrop(): void {
+  void onFileDrop((phase, paths) => {
+    if (phase === "enter") {
+      setDropHint(true);
+    } else if (phase === "leave") {
+      setDropHint(false);
+    } else if (phase === "drop") {
+      setDropHint(false);
+      const first = paths[0];
+      if (first) void handleDroppedPath(first);
+    }
+  }).catch(() => {
+    // Drag & drop is a progressive enhancement; ignore when unavailable.
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -645,8 +1309,10 @@ function initTheme(): void {
 /* -------------------------------------------------------------------------- */
 
 viewer.addEventListener("error", async () => {
-  // Fallback transport: pull the bytes over IPC and use a blob URL.
-  if (viewerFellBack || !currentPath) return;
+  // Fallback transport: pull the bytes over IPC and use a blob URL. A frame
+  // blob that fails would fall back to page 0, which is more confusing than
+  // just reporting the failure, so skip the fallback while stepping frames.
+  if (viewerFellBack || !currentPath || pageIndex !== null) return;
   viewerFellBack = true;
   const path = currentPath;
   try {
@@ -690,6 +1356,49 @@ slideshowInterval.addEventListener("change", () => {
   }
 });
 
+/* ---------------------------- editing / files ---------------------------- */
+
+btnSaveAs.addEventListener("click", () => void saveAs());
+btnSaveTransform.addEventListener("click", () => void saveTransformResult());
+btnCrop.addEventListener("click", () => setCropMode(!cropActive));
+btnCropApply.addEventListener("click", () => void applyCrop());
+btnCropClear.addEventListener("click", () => setCropRect(null));
+btnCropExit.addEventListener("click", () => setCropMode(false));
+
+for (const input of [cropX, cropY, cropW, cropH]) {
+  input.addEventListener("input", () => {
+    syncCropOverlay();
+    updateCropControls();
+  });
+}
+
+btnRename.addEventListener("click", () => {
+  if (currentPath) openRenameModal(currentPath);
+});
+btnRenameCancel.addEventListener("click", closeRenameModal);
+btnRenameConfirm.addEventListener("click", () => void submitRename());
+renameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void submitRename();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeRenameModal();
+  }
+});
+renameModal.addEventListener("pointerdown", (event) => {
+  if (event.target === renameModal) closeRenameModal();
+});
+
+btnDelete.addEventListener("click", () => void removeCurrent());
+btnCopyPath.addEventListener("click", () => void copyCurrentPath());
+
+/* ------------------------------- pages ---------------------------------- */
+
+btnPagePrev.addEventListener("click", () => void gotoPage((pageIndex ?? 0) - 1));
+btnPageNext.addEventListener("click", () => void gotoPage((pageIndex ?? 0) + 1));
+btnPageLive.addEventListener("click", () => void showLiveFrame());
+
 btnThumbs.addEventListener("click", () => setThumbsVisible(!thumbsVisible));
 btnInfo.addEventListener("click", () => setInfoVisible(!infoVisible));
 btnTheme.addEventListener("click", () => {
@@ -723,23 +1432,43 @@ stage.addEventListener(
   { passive: false },
 );
 
-stage.addEventListener("dblclick", () => void toggleFullscreen());
+stage.addEventListener("dblclick", () => {
+  if (cropActive) return;
+  void toggleFullscreen();
+});
 
-// Drag to pan.
+// Drag to pan — or, in crop mode, drag out a selection rectangle.
 let dragging = false;
 let lastX = 0;
 let lastY = 0;
+let selectStart: { x: number; y: number } | null = null;
+
+function stagePoint(event: PointerEvent): { x: number; y: number } {
+  const rect = stage.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
 
 stage.addEventListener("pointerdown", (event) => {
   if (!meta || event.button !== 0) return;
+  stage.setPointerCapture(event.pointerId);
+  if (cropActive) {
+    selectStart = stagePoint(event);
+    setCropRect(null);
+    return;
+  }
   dragging = true;
   lastX = event.clientX;
   lastY = event.clientY;
-  stage.setPointerCapture(event.pointerId);
   stage.classList.add("grabbing");
 });
 
 stage.addEventListener("pointermove", (event) => {
+  if (selectStart) {
+    // Ignore degenerate rects so the box does not flicker mid-drag.
+    const rect = cropRectFromStage(selectStart, stagePoint(event));
+    if (rect) setCropRect(rect);
+    return;
+  }
   if (!dragging) return;
   tx += event.clientX - lastX;
   ty += event.clientY - lastY;
@@ -749,12 +1478,16 @@ stage.addEventListener("pointermove", (event) => {
 });
 
 function endDrag(event: PointerEvent): void {
-  if (!dragging) return;
-  dragging = false;
-  stage.classList.remove("grabbing");
   if (stage.hasPointerCapture(event.pointerId)) {
     stage.releasePointerCapture(event.pointerId);
   }
+  if (selectStart) {
+    selectStart = null;
+    return;
+  }
+  if (!dragging) return;
+  dragging = false;
+  stage.classList.remove("grabbing");
 }
 
 stage.addEventListener("pointerup", endDrag);
@@ -762,7 +1495,9 @@ stage.addEventListener("pointercancel", endDrag);
 
 // Keep the image framed when the window resizes.
 window.addEventListener("resize", () => {
-  if (meta && fitActive) zoomToFit();
+  if (!meta) return;
+  if (fitActive) zoomToFit();
+  else if (cropActive) syncCropOverlay();
 });
 
 /* -------------------------------------------------------------------------- */
@@ -781,10 +1516,22 @@ function isEditable(target: EventTarget | null): boolean {
 }
 
 window.addEventListener("keydown", (event) => {
+  // The rename modal owns the keyboard while it is open.
+  if (renaming) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRenameModal();
+    }
+    return;
+  }
   if (event.ctrlKey || event.metaKey) {
-    if (event.key.toLowerCase() === "o") {
+    const key = event.key.toLowerCase();
+    if (key === "o") {
       event.preventDefault();
       btnOpen.click();
+    } else if (key === "s") {
+      event.preventDefault();
+      void saveAs();
     }
     return;
   }
@@ -879,6 +1626,11 @@ window.addEventListener("keydown", (event) => {
       setInfoVisible(!infoVisible);
       break;
 
+    case "c":
+    case "C":
+      if (meta && !isMultiPage()) setCropMode(!cropActive);
+      break;
+
     case " ":
       if (onButton) break;
       event.preventDefault();
@@ -892,6 +1644,7 @@ window.addEventListener("keydown", (event) => {
 
     case "Escape":
       if (document.fullscreenElement) void document.exitFullscreen();
+      else if (cropActive) setCropMode(false);
       else if (slideshowTimer !== null) stopSlideshow();
       break;
 
@@ -911,3 +1664,5 @@ updateControlsEnabled();
 updateNavigation();
 updateStatus();
 updateSlideshowButton();
+updatePageControls();
+wireDragAndDrop();
