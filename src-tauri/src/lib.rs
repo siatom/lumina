@@ -11,6 +11,10 @@ mod error;
 mod imaging;
 mod protocol;
 
+/// Format × result verification matrix (real fixtures on disk).
+#[cfg(test)]
+mod format_matrix;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -25,6 +29,11 @@ pub fn run() {
             commands::get_thumbnail,
             commands::get_image_bytes,
             commands::save_image_as,
+            commands::transform_image,
+            commands::get_image_pages,
+            commands::get_image_frame,
+            commands::rename_file,
+            commands::delete_file,
             commands::get_protocol_base,
         ])
         .run(tauri::generate_context!())

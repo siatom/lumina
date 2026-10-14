@@ -35,6 +35,21 @@ image = { version = "0.25", default-features = false, features = [
     "ico",
 ] }
 
+# Vector graphics (SVG) rasterisation for metadata / thumbnails / conversion.
+# Pure Rust (usvg + tiny-skia), no native toolchain required.
+# `raster-images` is disabled on purpose: it would pull a *second* copy of the
+# gif / jpeg decoders (resvg vendors its own), and embedded bitmaps inside SVG
+# are rare for icons/logos. `text` + system fonts are kept so `<text>` renders.
+resvg = { version = "0.45", default-features = false, features = [
+    "text",
+    "system-fonts",
+    "memmap-fonts",
+] }
+
+# Direct multi-page TIFF access (the `image` crate only exposes the first page).
+# Same major version as the one `image` already pulls in, so no duplicate build.
+tiff = "0.11"
+
 # Basic EXIF metadata reading.
 kamadak-exif = "0.6"
 

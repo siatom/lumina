@@ -1,28 +1,42 @@
 //! Core image pipeline: format detection, metadata, EXIF, decoding,
-//! thumbnailing and format conversion.
+//! thumbnailing, format conversion and image editing operations.
 //!
 //! This module is deliberately UI-agnostic (no Tauri types) so it can be unit
 //! tested in isolation and reused by the IPC commands and the custom protocol.
 
 use std::fs;
 use std::io::{BufReader, Cursor};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
-use image::{DynamicImage, ImageFormat, ImageReader};
-use serde::Serialize;
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::webp::WebPEncoder;
+use image::imageops::FilterType;
+use image::{AnimationDecoder, DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader};
+use serde::{Deserialize, Serialize};
+
+use resvg::{tiny_skia, usvg};
 
 use crate::error::AppError;
 
 /// File extensions Lumina can open (lower-case, without the dot).
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg",
 ];
 
 /// Formats a webview can render directly, so the original file bytes can be
 /// streamed without a re-encode. TIFF is intentionally excluded (browsers do
-/// not render it) and is transcoded to PNG by [`read_for_display`].
+/// not render it) and is transcoded to PNG by [`read_for_display`]. SVG *is*
+/// rendered natively by the webview, so it is streamed untouched as well.
 pub const WEBVIEW_NATIVE_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
+    &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
+
+/// Longest-edge cap when rasterising an SVG for metadata / thumbnails, so a
+/// pathological `width="100000"` document cannot allocate gigabytes.
+const SVG_MAX_DECODE_EDGE: u32 = 4096;
+
+/// Default JPEG quality when the caller does not supply one.
+pub const DEFAULT_JPEG_QUALITY: u8 = 85;
 
 /// Basic EXIF payload surfaced to the UI.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -30,12 +44,22 @@ pub struct ExifData {
     pub orientation: Option<u16>,
     pub make: Option<String>,
     pub model: Option<String>,
+    pub lens_model: Option<String>,
     pub datetime: Option<String>,
     pub software: Option<String>,
+    pub artist: Option<String>,
+    pub copyright: Option<String>,
+    pub description: Option<String>,
     pub exposure_time: Option<String>,
     pub f_number: Option<String>,
     pub iso: Option<String>,
     pub focal_length: Option<String>,
+    /// Decimal degrees, negative for southern hemisphere.
+    pub gps_latitude: Option<f64>,
+    /// Decimal degrees, negative for western hemisphere.
+    pub gps_longitude: Option<f64>,
+    /// Metres above sea level.
+    pub gps_altitude: Option<f64>,
 }
 
 /// Everything the frontend needs to render the info panel for one image.
@@ -70,6 +94,58 @@ pub struct DirectoryListing {
     pub index: Option<usize>,
 }
 
+/// Rectangle in *source* pixel coordinates. Values are clamped to the image
+/// bounds before cropping.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CropRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Resize request. `exact = true` forces exactly `width` x `height` (may
+/// distort); otherwise the aspect ratio is preserved and the result fits
+/// inside the given box.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeSpec {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub exact: Option<bool>,
+    /// "nearest" | "triangle" | "catmullrom" | "gaussian" | "lanczos3" (default).
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+/// Declarative image edit applied by [`transform_image`] / [`apply_transform`].
+///
+/// Operations are applied in a fixed, documented order so the frontend can
+/// preview them predictably: **crop → flip → rotate → resize → encode**.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformSpec {
+    /// 0 | 90 | 180 | 270 (clockwise).
+    #[serde(default)]
+    pub rotate: Option<u16>,
+    #[serde(default)]
+    pub flip_horizontal: Option<bool>,
+    #[serde(default)]
+    pub flip_vertical: Option<bool>,
+    #[serde(default)]
+    pub crop: Option<CropRect>,
+    #[serde(default)]
+    pub resize: Option<ResizeSpec>,
+    /// Target format name; when omitted it is inferred from the output path.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// 1..=100. Only honoured by the JPEG encoder (WebP/PNG are lossless).
+    #[serde(default)]
+    pub quality: Option<u8>,
+}
+
 // ---------------------------------------------------------------------------
 // Path / format helpers
 // ---------------------------------------------------------------------------
@@ -87,6 +163,11 @@ pub fn is_supported(path: &Path) -> bool {
     SUPPORTED_EXTENSIONS.contains(&extension_of(path).as_str())
 }
 
+/// Whether `path` is an SVG (handled by the vector rasteriser).
+pub fn is_svg(path: &Path) -> bool {
+    extension_of(path) == "svg"
+}
+
 /// MIME type for a lower-case extension.
 pub fn mime_for_ext(ext: &str) -> &'static str {
     match ext {
@@ -97,6 +178,7 @@ pub fn mime_for_ext(ext: &str) -> &'static str {
         "bmp" => "image/bmp",
         "tif" | "tiff" => "image/tiff",
         "ico" => "image/x-icon",
+        "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     }
 }
@@ -109,6 +191,49 @@ pub fn format_name(format: ImageFormat) -> String {
     match format.extensions_str().first() {
         Some(ext) => (*ext).to_string(),
         None => "unknown".to_string(),
+    }
+}
+
+/// Map a format name / extension onto an [`ImageFormat`].
+///
+/// AVIF and HEIC/HEIF are rejected with an explanatory message: neither has a
+/// pure-Rust decoder (see `docs/INTERFACES.md`, "格式支持矩阵").
+pub fn parse_format(name: &str) -> Result<ImageFormat, AppError> {
+    match name.trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "png" => Ok(ImageFormat::Png),
+        "jpg" | "jpeg" => Ok(ImageFormat::Jpeg),
+        "gif" => Ok(ImageFormat::Gif),
+        "webp" => Ok(ImageFormat::WebP),
+        "bmp" => Ok(ImageFormat::Bmp),
+        "tif" | "tiff" => Ok(ImageFormat::Tiff),
+        "ico" => Ok(ImageFormat::Ico),
+        "avif" => Err(AppError::Unsupported(
+            "avif: 解码需要原生 dav1d 构建，已评估并推迟（见 docs/INTERFACES.md）".into(),
+        )),
+        "heic" | "heif" => Err(AppError::Unsupported(
+            "heic/heif: 解码需要原生 libheif，已评估并推迟（见 docs/INTERFACES.md）".into(),
+        )),
+        other => Err(AppError::Unsupported(other.to_string())),
+    }
+}
+
+/// Resolve the output format from an explicit name, falling back to the
+/// output path's extension.
+fn resolve_output_format(
+    format: Option<&str>,
+    output: &Path,
+) -> Result<ImageFormat, AppError> {
+    match format {
+        Some(name) => parse_format(name),
+        None => {
+            let ext = extension_of(output);
+            if ext.is_empty() {
+                return Err(AppError::Other(
+                    "cannot infer output format: no explicit format and no file extension".into(),
+                ));
+            }
+            parse_format(&ext)
+        }
     }
 }
 
@@ -133,6 +258,27 @@ pub fn read_metadata(path: &Path) -> Result<ImageMetadata, AppError> {
     }
 
     let file_size = fs::metadata(path)?.len();
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // SVG has no raster header: parse the vector document instead.
+    if is_svg(path) {
+        let (width, height) = svg_dimensions(path)?;
+        return Ok(ImageMetadata {
+            path: path.to_string_lossy().into_owned(),
+            file_name,
+            format: "svg".to_string(),
+            width,
+            height,
+            file_size,
+            has_exif: false,
+            exif: None,
+        });
+    }
+
     let reader = reader_for(path)?;
 
     let format = reader
@@ -144,11 +290,6 @@ pub fn read_metadata(path: &Path) -> Result<ImageMetadata, AppError> {
     let (width, height) = reader.into_dimensions()?;
 
     let exif = read_exif(path);
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_string();
 
     Ok(ImageMetadata {
         path: path.to_string_lossy().into_owned(),
@@ -162,7 +303,39 @@ pub fn read_metadata(path: &Path) -> Result<ImageMetadata, AppError> {
     })
 }
 
-/// Extract a small, curated subset of EXIF tags.
+/// Find a field by its numeric tag id, regardless of which IFD (and therefore
+/// which tag *context*) it lives in.
+///
+/// Matching by number — rather than by `Tag` equality or tag name — keeps the
+/// lookup working for non-conforming files that place Exif-IFD tags in IFD0,
+/// and is stable across `kamadak-exif` versions.
+fn field_by_num(exif: &exif::Exif, num: u16) -> Option<&exif::Field> {
+    exif.fields().find(|f| f.tag.number() == num)
+}
+
+/// Read a tag as a string: ASCII values verbatim (no surrounding quotes, which
+/// `display_value()` would add), other types via the formatted display value.
+fn field_string(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
+    let field = field_by_num(exif, tag.number())?;
+    match &field.value {
+        exif::Value::Ascii(v) => v.first().map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .trim_end_matches('\0')
+                .to_string()
+        }),
+        _ => Some(field.display_value().to_string()),
+    }
+}
+
+/// Numeric value of a RATIONAL tag (first component).
+fn field_rational(exif: &exif::Exif, tag: exif::Tag) -> Option<f64> {
+    match &field_by_num(exif, tag.number())?.value {
+        exif::Value::Rational(v) if !v.is_empty() => Some(v[0].to_f64()),
+        _ => None,
+    }
+}
+
+/// Extract a curated subset of EXIF tags (camera, time, lens, GPS).
 ///
 /// Returns `None` when the file has no EXIF block or it cannot be parsed — a
 /// missing EXIF block is normal (PNG/BMP frequently have none), not an error.
@@ -171,38 +344,168 @@ fn read_exif(path: &Path) -> Option<ExifData> {
     let mut buf = BufReader::new(file);
     let exif = exif::Reader::new().read_from_container(&mut buf).ok()?;
 
-    // Match by tag name so we do not depend on exact enum variants across
-    // `kamadak-exif` versions.
-    let value_of = |name: &str| -> Option<String> {
-        exif.fields()
-            .find(|f| f.tag.to_string() == name)
-            .map(|f| f.display_value().to_string())
-    };
-
-    let orientation = exif
-        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+    let orientation = field_by_num(&exif, exif::Tag::Orientation.number())
         .and_then(|f| f.value.get_uint(0))
         .map(|v| v as u16);
 
+    // --- GPS: degrees/minutes/seconds → signed decimal degrees ---
+    let dms = |tag: exif::Tag| -> Option<(f64, f64, f64)> {
+        match &field_by_num(&exif, tag.number())?.value {
+            exif::Value::Rational(v) if v.len() >= 3 => {
+                Some((v[0].to_f64(), v[1].to_f64(), v[2].to_f64()))
+            }
+            _ => None,
+        }
+    };
+    let ascii_of = |tag: exif::Tag| -> Option<String> {
+        match &field_by_num(&exif, tag.number())?.value {
+            exif::Value::Ascii(v) => v
+                .first()
+                .map(|b| String::from_utf8_lossy(b).trim_end_matches('\0').to_string()),
+            _ => None,
+        }
+    };
+    let to_decimal = |(d, m, s): (f64, f64, f64)| d + m / 60.0 + s / 3600.0;
+
+    let gps_latitude = dms(exif::Tag::GPSLatitude).map(|dms| {
+        let v = to_decimal(dms);
+        if ascii_of(exif::Tag::GPSLatitudeRef).as_deref() == Some("S") {
+            -v
+        } else {
+            v
+        }
+    });
+    let gps_longitude = dms(exif::Tag::GPSLongitude).map(|dms| {
+        let v = to_decimal(dms);
+        if ascii_of(exif::Tag::GPSLongitudeRef).as_deref() == Some("W") {
+            -v
+        } else {
+            v
+        }
+    });
+    let gps_altitude = match field_by_num(&exif, exif::Tag::GPSAltitude.number()) {
+        Some(f) => match &f.value {
+            exif::Value::Rational(v) if !v.is_empty() => Some(v[0].to_f64()),
+            _ => None,
+        },
+        None => None,
+    };
+
     Some(ExifData {
         orientation,
-        make: value_of("Make"),
-        model: value_of("Model"),
-        datetime: value_of("DateTimeOriginal").or_else(|| value_of("DateTime")),
-        software: value_of("Software"),
-        exposure_time: value_of("ExposureTime"),
-        f_number: value_of("FNumber"),
-        iso: value_of("PhotographicSensitivity").or_else(|| value_of("ISOSpeedRatings")),
-        focal_length: value_of("FocalLength"),
+        make: field_string(&exif, exif::Tag::Make),
+        model: field_string(&exif, exif::Tag::Model),
+        lens_model: field_string(&exif, exif::Tag::LensModel),
+        datetime: field_string(&exif, exif::Tag::DateTimeOriginal)
+            .or_else(|| field_string(&exif, exif::Tag::DateTime)),
+        software: field_string(&exif, exif::Tag::Software),
+        artist: field_string(&exif, exif::Tag::Artist),
+        copyright: field_string(&exif, exif::Tag::Copyright),
+        description: field_string(&exif, exif::Tag::ImageDescription),
+        exposure_time: field_rational(&exif, exif::Tag::ExposureTime).map(format_exposure),
+        f_number: field_rational(&exif, exif::Tag::FNumber).map(|v| format!("f/{v:.1}")),
+        iso: field_string(&exif, exif::Tag::PhotographicSensitivity),
+        focal_length: field_rational(&exif, exif::Tag::FocalLength)
+            .map(|v| format!("{v:.0} mm")),
+        gps_latitude,
+        gps_longitude,
+        gps_altitude,
     })
+}
+
+/// Render an exposure time: fractions below a second (`1/250`), seconds above.
+fn format_exposure(seconds: f64) -> String {
+    if seconds <= 0.0 {
+        return "0 s".to_string();
+    }
+    if seconds < 1.0 {
+        format!("1/{:.0}", (1.0 / seconds).round())
+    } else {
+        format!("{seconds:.1} s")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SVG (vector) rasterisation
+// ---------------------------------------------------------------------------
+
+fn svg_error(e: usvg::Error) -> AppError {
+    AppError::Other(format!("SVG error: {e}"))
+}
+
+/// Shared, lazily-populated system font database so `<text>` in SVG renders.
+/// Loading happens once per process and only when the first SVG is opened.
+fn system_fontdb() -> &'static Arc<usvg::fontdb::Database> {
+    static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    })
+}
+
+fn svg_options() -> usvg::Options<'static> {
+    let mut opt = usvg::Options::default();
+    opt.fontdb = system_fontdb().clone();
+    opt
+}
+
+fn svg_tree(path: &Path) -> Result<usvg::Tree, AppError> {
+    let data = fs::read(path)?;
+    usvg::Tree::from_data(&data, &svg_options()).map_err(svg_error)
+}
+
+/// Intrinsic size of an SVG in CSS pixels (resolved from `width`/`height` or
+/// `viewBox`, honouring the 96 DPI default).
+pub fn svg_dimensions(path: &Path) -> Result<(u32, u32), AppError> {
+    let tree = svg_tree(path)?;
+    let size = tree.size();
+    Ok((size.width().round().max(1.0) as u32, size.height().round().max(1.0) as u32))
+}
+
+/// Rasterise an SVG to RGBA8. `max_edge` caps the longest side (defaults to
+/// [`SVG_MAX_DECODE_EDGE`]); the result keeps the document's aspect ratio.
+pub fn rasterize_svg(path: &Path, max_edge: Option<u32>) -> Result<DynamicImage, AppError> {
+    let tree = svg_tree(path)?;
+    let size = tree.size();
+    let (w_pt, h_pt) = (size.width(), size.height());
+
+    let cap = max_edge.unwrap_or(SVG_MAX_DECODE_EDGE).max(1) as f32;
+    let longest = w_pt.max(h_pt);
+    let scale = if longest > cap { cap / longest } else { 1.0 };
+
+    let w = ((w_pt * scale).round() as u32).max(1);
+    let h = ((h_pt * scale).round() as u32).max(1);
+
+    let mut pixmap = tiny_skia::Pixmap::new(w, h)
+        .ok_or_else(|| AppError::Other("failed to allocate SVG pixmap".into()))?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    // tiny-skia stores premultiplied alpha; undo it for image's straight RGBA.
+    let mut buf = Vec::with_capacity((w * h * 4) as usize);
+    for p in pixmap.pixels() {
+        let c = p.demultiply();
+        buf.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+
+    let img = image::RgbaImage::from_raw(w, h, buf)
+        .ok_or_else(|| AppError::Other("bad SVG raster buffer".into()))?;
+    Ok(DynamicImage::ImageRgba8(img))
 }
 
 // ---------------------------------------------------------------------------
 // Decode / encode
 // ---------------------------------------------------------------------------
 
-/// Fully decode an image into memory.
+/// Fully decode an image into memory. SVG documents are rasterised first.
 pub fn decode(path: &Path) -> Result<DynamicImage, AppError> {
+    if is_svg(path) {
+        return rasterize_svg(path, None);
+    }
     Ok(reader_for(path)?.decode()?)
 }
 
@@ -213,9 +516,50 @@ pub fn encode_png(img: &DynamicImage) -> Result<Vec<u8>, AppError> {
     Ok(buf)
 }
 
+/// Encode `img` in `format`, optionally with a quality hint.
+///
+/// Quality is only honoured by the JPEG encoder (`1..=100`). WebP and PNG are
+/// lossless in the `image` crate, so the parameter is ignored for them.
+pub fn encode_image(
+    img: &DynamicImage,
+    format: ImageFormat,
+    quality: Option<u8>,
+) -> Result<Vec<u8>, AppError> {
+    let mut buf = Vec::new();
+    match format {
+        ImageFormat::Jpeg => {
+            let rgb = img.to_rgb8();
+            let q = quality.unwrap_or(DEFAULT_JPEG_QUALITY).clamp(1, 100);
+            JpegEncoder::new_with_quality(Cursor::new(&mut buf), q).write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                ExtendedColorType::Rgb8,
+            )?;
+        }
+        ImageFormat::WebP => {
+            let rgba = img.to_rgba8();
+            WebPEncoder::new_lossless(Cursor::new(&mut buf)).write_image(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                ExtendedColorType::Rgba8,
+            )?;
+        }
+        other => img.write_to(&mut Cursor::new(&mut buf), other)?,
+    }
+    Ok(buf)
+}
+
 /// Produce a small PNG thumbnail that fits inside `max_size` on both axes,
 /// preserving aspect ratio. Always PNG so the result is webview-safe.
 pub fn make_thumbnail(path: &Path, max_size: u32) -> Result<Vec<u8>, AppError> {
+    // SVG is rasterised straight at the target size instead of at full size.
+    if is_svg(path) {
+        let img = rasterize_svg(path, Some(max_size))?;
+        let thumb = img.thumbnail(max_size, max_size);
+        return encode_png(&thumb);
+    }
     let img = decode(path)?;
     let thumb = img.thumbnail(max_size, max_size);
     encode_png(&thumb)
@@ -223,9 +567,9 @@ pub fn make_thumbnail(path: &Path, max_size: u32) -> Result<Vec<u8>, AppError> {
 
 /// Bytes to hand to an `<img>` element for the *original* view.
 ///
-/// For webview-native formats we stream the original file untouched (no
-/// re-encode, best quality + speed for large photos). For anything else
-/// (currently TIFF) we decode and transcode to PNG.
+/// For webview-native formats (incl. SVG) we stream the original file
+/// untouched (no re-encode, best quality + speed for large photos). For
+/// anything else (currently TIFF) we decode and transcode to PNG.
 pub fn read_for_display(path: &Path) -> Result<(Vec<u8>, &'static str), AppError> {
     let ext = extension_of(path);
     if WEBVIEW_NATIVE_EXTENSIONS.contains(&ext.as_str()) {
@@ -243,12 +587,309 @@ pub fn convert_image(
     input: &Path,
     output: &Path,
     format: Option<ImageFormat>,
+    quality: Option<u8>,
 ) -> Result<(), AppError> {
     let img = decode(input)?;
-    match format {
-        Some(f) => img.save_with_format(output, f)?,
-        None => img.save(output)?,
+    let fmt = match format {
+        Some(f) => f,
+        None => resolve_output_format(None, output)?,
+    };
+    let bytes = encode_image(&img, fmt, quality)?;
+    fs::write(output, bytes)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Image editing operations
+// ---------------------------------------------------------------------------
+
+/// Apply a [`TransformSpec`] to an already decoded image.
+///
+/// Order is fixed and documented: **crop → flip → rotate → resize**.
+pub fn apply_transform(
+    mut img: DynamicImage,
+    spec: &TransformSpec,
+) -> Result<DynamicImage, AppError> {
+    if let Some(c) = &spec.crop {
+        if c.width == 0 || c.height == 0 {
+            return Err(AppError::Other("crop width and height must be > 0".into()));
+        }
+        let (w, h) = (img.width(), img.height());
+        if c.x >= w || c.y >= h {
+            return Err(AppError::Other(format!(
+                "crop origin ({}, {}) is outside the {w}x{h} image",
+                c.x, c.y
+            )));
+        }
+        // Clamp the rectangle to the image bounds instead of failing.
+        let cw = c.width.min(w - c.x);
+        let ch = c.height.min(h - c.y);
+        img = img.crop_imm(c.x, c.y, cw, ch);
     }
+
+    if spec.flip_horizontal.unwrap_or(false) {
+        img = img.fliph();
+    }
+    if spec.flip_vertical.unwrap_or(false) {
+        img = img.flipv();
+    }
+
+    match spec.rotate.unwrap_or(0) % 360 {
+        0 => {}
+        90 => img = img.rotate90(),
+        180 => img = img.rotate180(),
+        270 => img = img.rotate270(),
+        other => {
+            return Err(AppError::Other(format!(
+                "rotate must be 0/90/180/270, got {other}"
+            )))
+        }
+    }
+
+    if let Some(r) = &spec.resize {
+        img = resize_image(img, r)?;
+    }
+
+    Ok(img)
+}
+
+fn resize_image(img: DynamicImage, r: &ResizeSpec) -> Result<DynamicImage, AppError> {
+    let filter = match r.filter.as_deref() {
+        None | Some("lanczos3") => FilterType::Lanczos3,
+        Some("nearest") => FilterType::Nearest,
+        Some("triangle") => FilterType::Triangle,
+        Some("catmullrom") => FilterType::CatmullRom,
+        Some("gaussian") => FilterType::Gaussian,
+        Some(other) => {
+            return Err(AppError::Other(format!("unknown resize filter: {other}")))
+        }
+    };
+
+    let exact = r.exact.unwrap_or(false);
+    match (r.width, r.height) {
+        (None, None) => Err(AppError::Other(
+            "resize requires at least one of width / height".into(),
+        )),
+        // `resize` fits inside the box preserving aspect ratio; passing
+        // u32::MAX on one axis pins the other axis exactly.
+        (Some(w), None) => Ok(img.resize(w.max(1), u32::MAX, filter)),
+        (None, Some(h)) => Ok(img.resize(u32::MAX, h.max(1), filter)),
+        (Some(w), Some(h)) if exact => Ok(img.resize_exact(w.max(1), h.max(1), filter)),
+        (Some(w), Some(h)) => Ok(img.resize(w.max(1), h.max(1), filter)),
+    }
+}
+
+/// Decode `input`, apply `spec`, encode and write to `output`.
+pub fn transform_image(
+    input: &Path,
+    output: &Path,
+    spec: &TransformSpec,
+) -> Result<(), AppError> {
+    let img = decode(input)?;
+    let img = apply_transform(img, spec)?;
+    let format = resolve_output_format(spec.format.as_deref(), output)?;
+    let bytes = encode_image(&img, format, spec.quality)?;
+
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(output, bytes)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Multi-page / animation support
+// ---------------------------------------------------------------------------
+
+fn gif_frames(path: &Path) -> Result<Vec<image::Frame>, AppError> {
+    let decoder =
+        image::codecs::gif::GifDecoder::new(BufReader::new(fs::File::open(path)?))?;
+    Ok(decoder.into_frames().collect_frames()?)
+}
+
+fn webp_frames(path: &Path) -> Result<Vec<image::Frame>, AppError> {
+    let decoder =
+        image::codecs::webp::WebPDecoder::new(BufReader::new(fs::File::open(path)?))?;
+    Ok(decoder.into_frames().collect_frames()?)
+}
+
+fn tiff_error(e: tiff::TiffError) -> AppError {
+    AppError::Other(format!("TIFF error: {e}"))
+}
+
+fn tiff_decoder(path: &Path) -> Result<tiff::decoder::Decoder<BufReader<fs::File>>, AppError> {
+    tiff::decoder::Decoder::new(BufReader::new(fs::File::open(path)?)).map_err(tiff_error)
+}
+
+fn tiff_page_count(path: &Path) -> Result<u32, AppError> {
+    let mut dec = tiff_decoder(path)?;
+    let mut count = 1u32;
+    while dec.more_images() {
+        dec.next_image().map_err(tiff_error)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn tiff_frame(path: &Path, index: u32) -> Result<DynamicImage, AppError> {
+    let mut dec = tiff_decoder(path)?;
+    for i in 0..index {
+        if !dec.more_images() {
+            return Err(AppError::Other(format!(
+                "TIFF page index {index} out of range (stopped at page {i})"
+            )));
+        }
+        dec.next_image().map_err(tiff_error)?;
+    }
+    let (w, h) = dec.dimensions().map_err(tiff_error)?;
+    let color = dec.colortype().map_err(tiff_error)?;
+    let data = dec.read_image().map_err(tiff_error)?;
+    tiff_to_dynamic(w, h, color, data)
+}
+
+fn tiff_to_dynamic(
+    w: u32,
+    h: u32,
+    color: tiff::ColorType,
+    data: tiff::decoder::DecodingResult,
+) -> Result<DynamicImage, AppError> {
+    use tiff::decoder::DecodingResult;
+
+    // 16-bit samples are down-converted to 8 bit (Lumina displays 8-bit).
+    fn narrow(samples: Vec<u16>) -> Vec<u8> {
+        samples.into_iter().map(|s| (s >> 8) as u8).collect()
+    }
+
+    let buffer = match (color, data) {
+        (tiff::ColorType::RGB(8), DecodingResult::U8(b)) => {
+            image::RgbImage::from_raw(w, h, b).map(DynamicImage::ImageRgb8)
+        }
+        (tiff::ColorType::RGBA(8), DecodingResult::U8(b)) => {
+            image::RgbaImage::from_raw(w, h, b).map(DynamicImage::ImageRgba8)
+        }
+        (tiff::ColorType::Gray(8), DecodingResult::U8(b)) => {
+            image::GrayImage::from_raw(w, h, b).map(DynamicImage::ImageLuma8)
+        }
+        (tiff::ColorType::GrayA(8), DecodingResult::U8(b)) => {
+            image::ImageBuffer::<image::LumaA<u8>, _>::from_raw(w, h, b)
+                .map(DynamicImage::ImageLumaA8)
+        }
+        (tiff::ColorType::RGB(16), DecodingResult::U16(b)) => {
+            image::RgbImage::from_raw(w, h, narrow(b)).map(DynamicImage::ImageRgb8)
+        }
+        (tiff::ColorType::RGBA(16), DecodingResult::U16(b)) => {
+            image::RgbaImage::from_raw(w, h, narrow(b)).map(DynamicImage::ImageRgba8)
+        }
+        (tiff::ColorType::Gray(16), DecodingResult::U16(b)) => {
+            image::GrayImage::from_raw(w, h, narrow(b)).map(DynamicImage::ImageLuma8)
+        }
+        (tiff::ColorType::GrayA(16), DecodingResult::U16(b)) => {
+            image::ImageBuffer::<image::LumaA<u8>, _>::from_raw(w, h, narrow(b))
+                .map(DynamicImage::ImageLumaA8)
+        }
+        (c, d) => {
+            return Err(AppError::Unsupported(format!(
+                "TIFF page color type not supported: {c:?} / {d:?}"
+            )))
+        }
+    };
+    buffer.ok_or_else(|| AppError::Other("TIFF page buffer size mismatch".into()))
+}
+
+/// Number of pages / frames in a file. Single-image formats return 1.
+///
+/// GIF and animated WebP report their frame count (all frames are decoded);
+/// multi-page TIFF reports its directory count.
+pub fn page_count(path: &Path) -> Result<u32, AppError> {
+    match extension_of(path).as_str() {
+        "gif" => Ok(gif_frames(path)?.len() as u32),
+        "webp" => Ok(webp_frames(path)?.len() as u32),
+        "tif" | "tiff" => tiff_page_count(path),
+        _ => Ok(1),
+    }
+}
+
+/// Extract a single page / frame as PNG bytes.
+pub fn read_frame_png(path: &Path, index: u32) -> Result<Vec<u8>, AppError> {
+    let img = match extension_of(path).as_str() {
+        "gif" => {
+            let frames = gif_frames(path)?;
+            let f = frames.get(index as usize).ok_or_else(|| {
+                AppError::Other(format!(
+                    "frame index {index} out of range ({} frames)",
+                    frames.len()
+                ))
+            })?;
+            DynamicImage::ImageRgba8(f.buffer().clone())
+        }
+        "webp" => {
+            let frames = webp_frames(path)?;
+            let f = frames.get(index as usize).ok_or_else(|| {
+                AppError::Other(format!(
+                    "frame index {index} out of range ({} frames)",
+                    frames.len()
+                ))
+            })?;
+            DynamicImage::ImageRgba8(f.buffer().clone())
+        }
+        "tif" | "tiff" => tiff_frame(path, index)?,
+        _ => {
+            if index != 0 {
+                return Err(AppError::Other(format!(
+                    "file has a single page; index {index} is out of range"
+                )));
+            }
+            decode(path)?
+        }
+    };
+    encode_png(&img)
+}
+
+// ---------------------------------------------------------------------------
+// File operations
+// ---------------------------------------------------------------------------
+
+/// Rename a file in place. `new_name` must be a plain file name (no path
+/// separators) and must not collide with an existing entry.
+pub fn rename_file(path: &Path, new_name: &str) -> Result<PathBuf, AppError> {
+    if new_name.trim().is_empty() {
+        return Err(AppError::Other("new name must not be empty".into()));
+    }
+    if new_name == "." || new_name == ".." || new_name.contains('/') || new_name.contains('\\') {
+        return Err(AppError::Other(
+            "new name must be a plain file name without path separators".into(),
+        ));
+    }
+    if !path.is_file() {
+        return Err(AppError::Other(format!("not a file: {}", path.display())));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Other("cannot rename a path without a parent directory".into()))?;
+    let target = parent.join(new_name);
+    if target.exists() {
+        return Err(AppError::Other(format!(
+            "target already exists: {}",
+            target.display()
+        )));
+    }
+    fs::rename(path, &target)?;
+    Ok(target)
+}
+
+/// Delete a single file. Refuses to touch directories or symlinks so a stray
+/// path can never wipe a whole folder.
+pub fn delete_file(path: &Path) -> Result<(), AppError> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_file() {
+        return Err(AppError::Other(format!(
+            "refusing to delete a non-regular file: {}",
+            path.display()
+        )));
+    }
+    fs::remove_file(path)?;
     Ok(())
 }
 
@@ -353,6 +994,7 @@ mod tests {
     fn detects_supported_extensions() {
         assert!(is_supported(Path::new("a.PNG")));
         assert!(is_supported(Path::new("dir/b.jpeg")));
+        assert!(is_supported(Path::new("vector.svg")));
         assert!(!is_supported(Path::new("a.txt")));
         assert!(!is_supported(Path::new("noext")));
     }
@@ -368,7 +1010,16 @@ mod tests {
     fn mime_lookup() {
         assert_eq!(mime_for_ext("jpg"), "image/jpeg");
         assert_eq!(mime_for_ext("tiff"), "image/tiff");
+        assert_eq!(mime_for_ext("svg"), "image/svg+xml");
         assert_eq!(mime_for_ext("bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn avif_and_heic_are_explicitly_unsupported() {
+        assert!(matches!(parse_format("avif"), Err(AppError::Unsupported(_))));
+        assert!(matches!(parse_format("heic"), Err(AppError::Unsupported(_))));
+        assert!(parse_format("PNG").is_ok());
+        assert!(parse_format(".jpg").is_ok());
     }
 
     /// End-to-end exercise of the pipeline on real files on disk:
@@ -420,6 +1071,71 @@ mod tests {
             vec!["sample.png", "sample.tiff", "sample2.png", "sample10.png"]
         );
         assert_eq!(listing.index, Some(0));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn transform_order_crop_flip_rotate_resize() {
+        let img = image::RgbImage::from_fn(40, 20, |x, y| {
+            image::Rgb([(x * 6) as u8, (y * 12) as u8, 0])
+        });
+        let src = DynamicImage::ImageRgb8(img);
+
+        // crop to 30x10, flip vertically, rotate 90, resize width to 15.
+        let spec = TransformSpec {
+            rotate: Some(90),
+            flip_vertical: Some(true),
+            crop: Some(CropRect { x: 10, y: 5, width: 30, height: 10 }),
+            resize: Some(ResizeSpec { width: Some(15), ..Default::default() }),
+            ..Default::default()
+        };
+        let out = apply_transform(src, &spec).unwrap();
+        // 30x10 -> rotate90 -> 10x30 -> width 15 keeps aspect -> 15x45.
+        assert_eq!((out.width(), out.height()), (15, 45));
+    }
+
+    #[test]
+    fn transform_rejects_bad_inputs() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::new(10, 10));
+        let bad_rotate = TransformSpec { rotate: Some(45), ..Default::default() };
+        assert!(apply_transform(img.clone(), &bad_rotate).is_err());
+
+        let no_size = TransformSpec {
+            resize: Some(ResizeSpec::default()),
+            ..Default::default()
+        };
+        assert!(apply_transform(img.clone(), &no_size).is_err());
+
+        let zero_crop = TransformSpec {
+            crop: Some(CropRect { x: 0, y: 0, width: 0, height: 5 }),
+            ..Default::default()
+        };
+        assert!(apply_transform(img, &zero_crop).is_err());
+    }
+
+    #[test]
+    fn jpeg_quality_changes_size() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 3) as u8, ((x + y) * 2) as u8])
+        }));
+        let low = encode_image(&img, ImageFormat::Jpeg, Some(20)).unwrap();
+        let high = encode_image(&img, ImageFormat::Jpeg, Some(95)).unwrap();
+        assert!(high.len() > low.len());
+    }
+
+    #[test]
+    fn rename_rejects_path_separators() {
+        let dir = std::env::temp_dir().join(format!("lumina-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.png");
+        std::fs::write(&f, b"x").unwrap();
+
+        assert!(rename_file(&f, "sub/b.png").is_err());
+        assert!(rename_file(&f, "..").is_err());
+        let renamed = rename_file(&f, "b.png").unwrap();
+        assert!(renamed.is_file());
+        assert!(!f.exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }

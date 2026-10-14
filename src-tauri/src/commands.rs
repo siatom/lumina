@@ -6,11 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::AppError;
-use crate::imaging::{self, DirectoryListing, ImageMetadata};
+use crate::imaging::{self, DirectoryListing, ImageMetadata, TransformSpec};
 use crate::protocol;
 
-/// Metadata for a single image: dimensions, format, size and basic EXIF.
+/// Metadata for a single image: dimensions, format, size and EXIF.
 ///
 /// `path` is the *original* file path; the frontend turns it into a display URL
 /// via the `lumina://` protocol (see [`get_protocol_base`]).
@@ -46,24 +45,74 @@ pub fn get_image_bytes(path: String) -> Result<tauri::ipc::Response, String> {
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Save/convert an image to another format.
+/// Save/convert an image without geometry changes.
 ///
 /// `format` is optional; when omitted the output format is inferred from the
-/// `output_path` extension. Returns the written path.
+/// `output_path` extension. `quality` (`1..=100`) only affects JPEG. Returns
+/// the written path.
 #[tauri::command]
 pub fn save_image_as(
     input_path: String,
     output_path: String,
     format: Option<String>,
+    quality: Option<u8>,
 ) -> Result<String, String> {
     let fmt = format
         .as_deref()
-        .map(parse_format)
+        .map(imaging::parse_format)
         .transpose()
         .map_err(|e| e.to_string())?;
-    imaging::convert_image(Path::new(&input_path), Path::new(&output_path), fmt)
+    imaging::convert_image(
+        Path::new(&input_path),
+        Path::new(&output_path),
+        fmt,
+        quality,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(output_path)
+}
+
+/// Apply an edit (crop / flip / rotate / resize) and write the result to
+/// `output_path`. See [`TransformSpec`] for the field contract and the fixed
+/// operation order (crop → flip → rotate → resize).
+#[tauri::command]
+pub fn transform_image(
+    input_path: String,
+    output_path: String,
+    options: TransformSpec,
+) -> Result<String, String> {
+    imaging::transform_image(Path::new(&input_path), Path::new(&output_path), &options)
         .map_err(|e| e.to_string())?;
     Ok(output_path)
+}
+
+/// Number of pages / frames (GIF, animated WebP, multi-page TIFF). Single
+/// image formats report `1`.
+#[tauri::command]
+pub fn get_image_pages(path: String) -> Result<u32, String> {
+    imaging::page_count(Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// Extract one page / frame as a PNG (`ArrayBuffer`).
+#[tauri::command]
+pub fn get_image_frame(path: String, index: u32) -> Result<tauri::ipc::Response, String> {
+    let bytes = imaging::read_frame_png(Path::new(&path), index).map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Rename a file in place; returns the new absolute path. `new_name` must be a
+/// plain file name (no path separators) and must not already exist.
+#[tauri::command]
+pub fn rename_file(path: String, new_name: String) -> Result<String, String> {
+    let renamed = imaging::rename_file(Path::new(&path), &new_name).map_err(|e| e.to_string())?;
+    Ok(renamed.to_string_lossy().into_owned())
+}
+
+/// Delete a single file. The backend refuses directories and symlinks; the UI
+/// is responsible for asking the user to confirm first.
+#[tauri::command]
+pub fn delete_file(path: String) -> Result<(), String> {
+    imaging::delete_file(Path::new(&path)).map_err(|e| e.to_string())
 }
 
 /// Platform-correct base URL for the `lumina://` transport, e.g.
@@ -71,17 +120,4 @@ pub fn save_image_as(
 #[tauri::command]
 pub fn get_protocol_base() -> String {
     protocol::protocol_base()
-}
-
-fn parse_format(name: &str) -> Result<image::ImageFormat, AppError> {
-    match name.to_ascii_lowercase().as_str() {
-        "png" => Ok(image::ImageFormat::Png),
-        "jpg" | "jpeg" => Ok(image::ImageFormat::Jpeg),
-        "gif" => Ok(image::ImageFormat::Gif),
-        "webp" => Ok(image::ImageFormat::WebP),
-        "bmp" => Ok(image::ImageFormat::Bmp),
-        "tif" | "tiff" => Ok(image::ImageFormat::Tiff),
-        "ico" => Ok(image::ImageFormat::Ico),
-        other => Err(AppError::Unsupported(other.to_string())),
-    }
 }
