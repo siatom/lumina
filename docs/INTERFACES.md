@@ -339,6 +339,14 @@ function onDirectoryChanged(handler: (dir: string) => void): Promise<UnlistenFn>
 
 > 修改检测依赖 `modified_ms` 与 `file_size` 两个字段（见 §4.1），后端 `ImageEntry` 必须持续提供它们。
 
+### 4.13 `get_launch_path`（文件关联启动）
+
+```ts
+function getLaunchPath(): Promise<string | null>;
+```
+
+返回操作系统通过文件关联传入的、已存在且扩展名受支持的图片路径；普通启动或参数不是图片时返回 `null`。前端初始化时调用一次并打开该路径。
+
 ### 4.13 文件关联（`get_association_status` / `set_file_association` / `open_default_apps_settings`）
 
 让 Lumina 成为图片的默认打开方式，并在 Windows 上为**每种格式挂一个专属文件图标**。详见 §10。

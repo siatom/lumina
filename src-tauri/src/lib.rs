@@ -47,6 +47,7 @@ pub fn run() {
             commands::set_file_association,
             commands::open_default_apps_settings,
             commands::get_protocol_base,
+            commands::get_launch_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

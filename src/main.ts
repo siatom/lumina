@@ -32,6 +32,7 @@ import {
   getImageFrame,
   getImageMetadata,
   getImagePages,
+  getLaunchPath,
   getThumbnail,
   listImages,
   luminaImageUrl,
@@ -2365,3 +2366,8 @@ updateSlideshowButton();
 updatePageControls();
 wireDragAndDrop();
 void onDirectoryChanged(handleDirectoryChanged);
+void getLaunchPath()
+  .then((path) => {
+    if (path) return openPath(path);
+  })
+  .catch((err: unknown) => showToast(`无法打开关联图片：${String(err)}`));

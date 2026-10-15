@@ -149,6 +149,24 @@ pub fn get_protocol_base() -> String {
     protocol::protocol_base()
 }
 
+/// Return the image path passed by the operating system when Lumina was
+/// launched through a file association.
+///
+/// Explorer invokes the registered command as `Lumina.exe "%1"`. Returning
+/// only an existing, supported file keeps unrelated process arguments (for
+/// example development flags) from being treated as an image path.
+#[tauri::command]
+pub fn get_launch_path() -> Option<String> {
+    std::env::args_os().skip(1).find_map(|arg| {
+        let path = PathBuf::from(arg);
+        if path.is_file() && imaging::is_supported(&path) {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    })
+}
+
 /* --------------------------- file association ---------------------------- */
 
 /// Current operating-system association state for every format Lumina opens.

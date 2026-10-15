@@ -310,6 +310,11 @@ export async function protocolBase(): Promise<string> {
   return cachedBase;
 }
 
+/** Image path supplied by the OS when Lumina was opened through file association. */
+export function getLaunchPath(): Promise<string | null> {
+  return invoke<string | null>("get_launch_path");
+}
+
 /**
  * Build a `lumina://` URL for an image.
  *
