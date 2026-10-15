@@ -1,0 +1,32 @@
+# .local-cicd.yaml —— 本机构建 + 本机部署（Lumina：Tauri 2 桌面应用）
+# 由 /local-cicd 生成。字段留空时按项目标记自动探测。
+version: 1
+
+# —— 构建阶段 ——
+install: "pnpm install --frozen-lockfile"
+# 改动「会被嵌进制品的外部资源」（src-tauri/icons/*、assets/file-assets）后，
+# 把下面一行放开，清掉 tauri-build 缓存的资源库，否则旧图标会被原样重新链接进 exe：
+# clean: "rm -rf src-tauri/target/release/build/lumina-* src-tauri/target/release/lumina.exe src-tauri/target/release/deps/lumina*"
+clean: ""
+build: "pnpm tauri build --bundles nsis"
+
+# —— 部署阶段（桌面应用：制品快照 → 静默安装）——
+deploy:
+  workdir: "."
+  stop: ""
+  start: ""            # 桌面应用无常驻服务，改用下面的 install
+  install: "src-tauri/target/release/bundle/nsis/Lumina_0.1.0_x64-setup.exe /S"
+  install_kill: ""     # 首次安装，无旧实例需关闭；覆盖安装已装版本时可填 "lumina.exe"
+  ready_timeout: 120
+
+# —— 验证阶段 ——
+# 桌面应用没有健康端点，改为「已安装 exe 落盘 + 与构建产物一致 + 启动进程存活」冒烟。
+# 注意：NSIS 安装器会在安装时改写 exe 末尾 3 字节的 bundle-type 标记
+#（TYPE_VAR_UNK → TYPE_VAR_NSS），故按「差异字节数 ≤ 8」判定为同一制品，而非全等哈希。
+verify:
+  url: ""
+  command: 'EXE="$LOCALAPPDATA/Lumina/lumina.exe"; REL=".local-cicd/releases/$(cat .local-cicd/current)"; test -f "$EXE" || { echo "未找到已安装的 lumina.exe"; exit 1; }; d=$(cmp -l "$EXE" "$REL/lumina.exe" | wc -l); [ "$d" -le 8 ] || { echo "已安装 exe 与构建产物差异过大: $d 字节"; exit 1; }; echo "制品一致（仅差 $d 字节安装器标记）"; "$EXE" & sleep 8; tasklist //FI "IMAGENAME eq lumina.exe" | grep -qi lumina.exe && echo "lumina.exe 已启动并存活"'
+  timeout: 30
+
+# —— 回滚 ——
+keep_releases: 3

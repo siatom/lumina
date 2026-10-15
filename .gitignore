@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Local CI/CD workspace (build snapshots, pid/pm files, logs)
+.local-cicd/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
