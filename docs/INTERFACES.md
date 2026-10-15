@@ -621,12 +621,12 @@ src-tauri> cargo test --all-targets                   # 全量（23 项）
 
 ### 10.3 图标设计
 
-单一设计源 `assets/file-icons/*.svg`（1024×1024，手写 SVG），两种产物：
+单一设计源 `assets/file-icons/*.svg`（1024×1024，由 `scripts/make-file-icons.py` 生成），两种产物：
 
 - **`.ico`**（Windows 用）：`cd src-tauri && cargo run --bin gen-file-icons` → `src-tauri/icons/file-icons/<key>.ico`，含 16/24/32/48/64/256 六个尺寸。缺尺寸会让资源管理器在对应视图下放大邻近尺寸，图标就糊了。产物已提交入库，随 `bundle.resources` 打包。
 - **SVG**（应用内预览用）：`src/main.ts` 直接 import，Vite 出 URL。设置面板里的预览与 Explorer 里看到的来自同一份设计。
 
-造型：沿用应用图标 `assets/icon.svg` 的深蓝 squircle 底板与渐变（`#0E1420 → #1C2637`），中央是**格式强调色**的字形缩写；底板外加一圈该格式色的柔光晕——它是品牌里「光」的延续，也是 16px 下唯一还分辨得出的信息（字形此时已糊成色块）。
+造型：squircle 底板 + **格式强调色**的字形缩写 + 一圈该格式色的柔光晕——它是品牌里「光」的延续，也是 16px 下唯一还分辨得出的信息（字形此时已糊成色块）。底板为**浅色**（`#F8FAFC → #E2E8F0` 对角渐变，`#0F172A` 10% 细描边），与应用图标 `assets/icon.svg` 目前的深蓝底板（`#0E1420 → #1C2637`）不一致。
 
 10 个扩展名归为 8 个字形（`jpg`/`jpeg` 共用一个、`tif`/`tiff` 共用一个），但**各自有独立 ProgID**，所以仍能按扩展名分别处理：
 
@@ -637,7 +637,7 @@ src-tauri> cargo test --all-targets                   # 全量（23 项）
 | `gif` | gif | `#FF5C8A` |
 | `webp` | webp | `#2ED3A0` |
 | `bmp` | bmp | `#A78BFA` |
-| `tif` `tiff` | tiff | `#8FA3BF` |
+| `tif` `tiff` | tiff | `#64748B` |
 | `ico` | ico | `#F5C542` |
 | `svg` | svg | `#29D0E8` |
 
@@ -646,7 +646,7 @@ src-tauri> cargo test --all-targets                   # 全量（23 项）
 ### 10.4 目录结构与验证边界
 
 ```
-assets/file-icons/*.svg             设计源（手写）
+assets/file-icons/*.svg             设计源（由脚本生成）
 scripts/make-file-icons.py          生成上述 SVG（可复现）
 src-tauri/src/bin/gen-file-icons.rs SVG → 多尺寸 .ico
 src-tauri/icons/file-icons/*.ico    产物，随 bundle.resources 打包
