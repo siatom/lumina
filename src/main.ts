@@ -1876,6 +1876,7 @@ function setInfoVisible(visible: boolean): void {
 }
 
 type Theme = "dark" | "light";
+const systemTheme = window.matchMedia("(prefers-color-scheme: light)");
 
 function applyTheme(theme: Theme): void {
   document.documentElement.dataset.theme = theme;
@@ -1883,21 +1884,13 @@ function applyTheme(theme: Theme): void {
   // action the click will perform.
   btnTheme.dataset.state = theme === "light" ? "on" : "off";
   btnTheme.title = theme === "light" ? "切换到深色主题" : "切换到浅色主题";
-  try {
-    localStorage.setItem("lumina-theme", theme);
-  } catch {
-    /* storage unavailable — theme stays for this session only */
-  }
 }
 
 function initTheme(): void {
-  let saved: string | null = null;
-  try {
-    saved = localStorage.getItem("lumina-theme");
-  } catch {
-    saved = null;
-  }
-  applyTheme(saved === "light" ? "light" : "dark");
+  applyTheme(systemTheme.matches ? "light" : "dark");
+  systemTheme.addEventListener("change", (event) => {
+    applyTheme(event.matches ? "light" : "dark");
+  });
 }
 
 /* -------------------------------------------------------------------------- */

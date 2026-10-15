@@ -6,8 +6,7 @@ version: 1
 install: "pnpm install --frozen-lockfile"
 # 改动「会被嵌进制品的外部资源」（src-tauri/icons/*、assets/file-assets）后，
 # 把下面一行放开，清掉 tauri-build 缓存的资源库，否则旧图标会被原样重新链接进 exe：
-# clean: "rm -rf src-tauri/target/release/build/lumina-* src-tauri/target/release/lumina.exe src-tauri/target/release/deps/lumina*"
-clean: ""
+clean: "rm -rf src-tauri/target/release/build/lumina-* src-tauri/target/release/lumina.exe src-tauri/target/release/deps/lumina*"
 build: "pnpm tauri build --bundles nsis"
 
 # —— 部署阶段（桌面应用：制品快照 → 静默安装）——
