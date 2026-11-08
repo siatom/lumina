@@ -109,6 +109,18 @@ pnpm tauri dev        # 启动开发模式（Vite + Rust 热重载）
 pnpm tauri build      # 打包发布版本
 ```
 
+### 本机安装包构建与静默安装
+
+在 Windows 上运行会构建 NSIS 安装包并以 `/S` 静默安装；在 macOS 上构建 DMG，并静默安装到当前用户的 `~/Applications/Lumina.app`（不需要管理员权限）：
+
+```bash
+pnpm package:install                    # 构建并静默安装
+pnpm package:install -- --build-only    # 只构建安装包
+pnpm package:install -- --install-only  # 安装最近构建的安装包
+```
+
+脚本只支持在对应系统本机打包：Windows 生成 NSIS，macOS 生成 DMG。首次运行前需安装项目要求的 Rust、Node.js、pnpm，以及 Tauri 对应平台的构建依赖。
+
 单独校验：
 
 ```bash
