@@ -592,6 +592,10 @@ function updateControlsEnabled(): void {
   btnResizeImage.title = isMultiPage()
     ? "多页 / 动图暂不支持调整分辨率（仅处理第一页）"
     : "按像素尺寸或百分比调整分辨率";
+  // The bar targets a single frame; switching to a multi-page file closes it
+  // instead of leaving numbers that would resize only page 0 behind a button
+  // that is now disabled.
+  if (isMultiPage()) resizeBar.hidden = true;
   btnResizeOverwrite.disabled = !on || isMultiPage() || !ENCODABLE.includes(meta?.format.toLowerCase() ?? "");
   btnResizeOverwrite.title = on && !ENCODABLE.includes(meta?.format.toLowerCase() ?? "")
     ? "当前格式不能覆盖保存，请使用“另存为”输出为支持的格式"
@@ -842,6 +846,7 @@ function reconcileViewerDims(): void {
   fileDims = { w, h };
   updateStatus();
   reflow();
+  syncResizePanel();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -944,6 +949,7 @@ async function openPath(path: string): Promise<void> {
   updateStatus();
   updateControlsEnabled();
   updatePageControls();
+  syncResizePanel();
 
   // Put the image on screen before anything that is not required to show it.
   const url = await luminaImageUrl(m.path, {
@@ -1261,15 +1267,27 @@ async function saveTransformResult(): Promise<void> {
   }
 }
 
+/**
+ * Point the resize bar at the open image.
+ *
+ * The bar holds a *target* size rather than a per-image setting, so when the
+ * viewer moves to another file the previous numbers would silently describe
+ * the old image — overwriting the new one would then upscale it to dimensions
+ * it never had. Every switch therefore resets the bar to the new image's own
+ * pixel grid at 100%.
+ */
+function syncResizePanel(): void {
+  if (!meta || resizeBar.hidden) return;
+  resizeOriginal.textContent = `原始 ${meta.width} × ${meta.height} px`;
+  resizeW.value = String(meta.width);
+  resizeH.value = String(meta.height);
+  resizePercent.value = "100";
+}
+
 function openResizePanel(): void {
   if (!meta || viewer.naturalWidth < 1 || viewer.naturalHeight < 1) return;
-  const w = viewer.naturalWidth;
-  const h = viewer.naturalHeight;
-  resizeOriginal.textContent = `原始 ${w} × ${h} px`;
-  resizeW.value = String(w);
-  resizeH.value = String(h);
-  resizePercent.value = "100";
   resizeBar.hidden = false;
+  syncResizePanel();
 }
 
 function resizeSpec(): ResizeSpec | null {
@@ -1283,21 +1301,21 @@ function resizeSpec(): ResizeSpec | null {
 }
 
 function syncResizeFromPercent(): void {
-  if (!meta || viewer.naturalWidth < 1) return;
+  if (!meta) return;
   const percent = Number(resizePercent.value);
   if (!Number.isFinite(percent) || percent < 1 || percent > 800) return;
-  resizeW.value = String(Math.max(1, Math.round(viewer.naturalWidth * percent / 100)));
-  resizeH.value = String(Math.max(1, Math.round(viewer.naturalHeight * percent / 100)));
+  resizeW.value = String(Math.max(1, Math.round(meta.width * percent / 100)));
+  resizeH.value = String(Math.max(1, Math.round(meta.height * percent / 100)));
 }
 
 function syncResizeFromDimension(changed: "width" | "height"): void {
-  if (!resizeLock.checked || viewer.naturalWidth < 1) return;
+  if (!meta || !resizeLock.checked) return;
   const value = Number(changed === "width" ? resizeW.value : resizeH.value);
   if (!Number.isFinite(value) || value < 1) return;
-  const ratio = viewer.naturalWidth / viewer.naturalHeight;
+  const ratio = meta.width / meta.height;
   if (changed === "width") resizeH.value = String(Math.max(1, Math.round(value / ratio)));
   else resizeW.value = String(Math.max(1, Math.round(value * ratio)));
-  resizePercent.value = String(Math.round(value / (changed === "width" ? viewer.naturalWidth : viewer.naturalHeight) * 100));
+  resizePercent.value = String(Math.round(value / (changed === "width" ? meta.width : meta.height) * 100));
 }
 
 async function writeResized(outputPath: string): Promise<void> {
