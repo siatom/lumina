@@ -50,8 +50,10 @@ function findArtifact() {
 function build() {
   const args = ["tauri", "build", "--bundles", bundle];
   if (platform === "win32") {
-    // pnpm is normally exposed as pnpm.cmd on Windows.
-    run("pnpm.cmd", args, { shell: true });
+    // pnpm is normally exposed as pnpm.cmd on Windows, which CreateProcess
+    // cannot launch directly, so route through cmd.exe. `shell: true` would do
+    // the same thing but triggers DEP0190 (args + shell) on Node 22+.
+    run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "pnpm", ...args]);
   } else {
     run("pnpm", args);
   }
