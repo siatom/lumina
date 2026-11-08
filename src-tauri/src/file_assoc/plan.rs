@@ -118,6 +118,10 @@ pub struct RegPlan {
 
 impl RegPlan {
     /// Every value the plan intends to write under `key` with `name`.
+    ///
+    /// Only the tests inspect a plan by key; the executor in
+    /// [`super::windows`] just walks `write`, so this stays test-only.
+    #[cfg(test)]
     pub fn find(&self, key: &str, name: &str) -> Option<&RegOp> {
         self.write.iter().find(|op| op.key == key && op.name == name)
     }
