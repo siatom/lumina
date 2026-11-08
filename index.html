@@ -345,6 +345,10 @@
             <svg class="icon"><use href="#i-save-all" /></svg>
             <span>保存旋转结果</span>
           </button>
+          <button id="btn-resize-image" disabled>
+            <svg class="icon"><use href="#i-sliders" /></svg>
+            <span>调整分辨率…</span>
+          </button>
 
           <p class="menu-label">幻灯片</p>
           <div class="menu-row">
@@ -398,6 +402,24 @@
         <span class="bar-hint">
           在图像上拖拽可框选；旋转/翻转会一并写入输出文件
         </span>
+      </div>
+
+      <div class="crop-bar resize-bar" id="resize-bar" hidden>
+        <span class="bar-label">调整分辨率</span>
+        <span id="resize-original" class="bar-hint"></span>
+        <label class="field">宽 <input id="resize-w" type="number" min="1" step="1" /></label>
+        <label class="field">高 <input id="resize-h" type="number" min="1" step="1" /></label>
+        <label class="resize-lock"><input id="resize-lock" type="checkbox" checked />保持比例</label>
+        <label class="field">缩放 <input id="resize-percent" type="number" min="1" max="800" step="1" value="100" />%</label>
+        <label class="field">算法
+          <select id="resize-filter" title="缩放插值算法">
+            <option value="lanczos3" selected>Lanczos</option><option value="catmullrom">Catmull-Rom</option>
+            <option value="triangle">Triangle</option><option value="nearest">Nearest</option>
+          </select>
+        </label>
+        <button id="btn-resize-save" class="primary">另存为…</button>
+        <button id="btn-resize-overwrite">覆盖原图</button>
+        <button id="btn-resize-close">关闭</button>
       </div>
 
       <div class="workspace">

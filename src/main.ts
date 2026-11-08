@@ -54,6 +54,7 @@ import {
   type DirectoryListing,
   type ImageEntry,
   type ImageMetadata,
+  type ResizeSpec,
 } from "./api";
 
 // The per-format file icons, shown in the association panel. These are the same
@@ -138,6 +139,13 @@ const cropX = el<HTMLInputElement>("crop-x");
 const cropY = el<HTMLInputElement>("crop-y");
 const cropW = el<HTMLInputElement>("crop-w");
 const cropH = el<HTMLInputElement>("crop-h");
+const resizeBar = el<HTMLElement>("resize-bar");
+const resizeW = el<HTMLInputElement>("resize-w");
+const resizeH = el<HTMLInputElement>("resize-h");
+const resizeLock = el<HTMLInputElement>("resize-lock");
+const resizePercent = el<HTMLInputElement>("resize-percent");
+const resizeFilter = el<HTMLSelectElement>("resize-filter");
+const resizeOriginal = el<HTMLElement>("resize-original");
 
 const renameModal = el<HTMLElement>("rename-modal");
 const renameInput = el<HTMLInputElement>("rename-input");
@@ -167,6 +175,10 @@ const slideshowInterval = el<HTMLSelectElement>("slideshow-interval");
 const btnSaveAs = el<HTMLButtonElement>("btn-save-as");
 const qualitySelect = el<HTMLSelectElement>("quality-select");
 const btnSaveTransform = el<HTMLButtonElement>("btn-save-transform");
+const btnResizeImage = el<HTMLButtonElement>("btn-resize-image");
+const btnResizeSave = el<HTMLButtonElement>("btn-resize-save");
+const btnResizeOverwrite = el<HTMLButtonElement>("btn-resize-overwrite");
+const btnResizeClose = el<HTMLButtonElement>("btn-resize-close");
 const btnCrop = el<HTMLButtonElement>("btn-crop");
 const btnCropApply = el<HTMLButtonElement>("btn-crop-apply");
 const btnCropClear = el<HTMLButtonElement>("btn-crop-clear");
@@ -568,12 +580,22 @@ function updateControlsEnabled(): void {
     btnSlideshow,
     zoomLabel,
     btnSaveAs,
+    btnResizeImage,
     btnRename,
     btnDelete,
     btnCopyPath,
   ]) {
     button.disabled = !on;
   }
+
+  btnResizeImage.disabled = !on || isMultiPage();
+  btnResizeImage.title = isMultiPage()
+    ? "多页 / 动图暂不支持调整分辨率（仅处理第一页）"
+    : "按像素尺寸或百分比调整分辨率";
+  btnResizeOverwrite.disabled = !on || isMultiPage() || !ENCODABLE.includes(meta?.format.toLowerCase() ?? "");
+  btnResizeOverwrite.title = on && !ENCODABLE.includes(meta?.format.toLowerCase() ?? "")
+    ? "当前格式不能覆盖保存，请使用“另存为”输出为支持的格式"
+    : "调整分辨率并覆盖当前文件";
 
   btnCrop.disabled = !on || isMultiPage();
   btnCrop.title = isMultiPage()
@@ -1237,6 +1259,71 @@ async function saveTransformResult(): Promise<void> {
   } catch (err) {
     showToast(`保存失败：${String(err)}`);
   }
+}
+
+function openResizePanel(): void {
+  if (!meta || viewer.naturalWidth < 1 || viewer.naturalHeight < 1) return;
+  const w = viewer.naturalWidth;
+  const h = viewer.naturalHeight;
+  resizeOriginal.textContent = `原始 ${w} × ${h} px`;
+  resizeW.value = String(w);
+  resizeH.value = String(h);
+  resizePercent.value = "100";
+  resizeBar.hidden = false;
+}
+
+function resizeSpec(): ResizeSpec | null {
+  const width = Math.floor(Number(resizeW.value));
+  const height = Math.floor(Number(resizeH.value));
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+    showToast("请输入大于 0 的有效宽度和高度");
+    return null;
+  }
+  return { width, height, exact: !resizeLock.checked, filter: resizeFilter.value as ResizeSpec["filter"] };
+}
+
+function syncResizeFromPercent(): void {
+  if (!meta || viewer.naturalWidth < 1) return;
+  const percent = Number(resizePercent.value);
+  if (!Number.isFinite(percent) || percent < 1 || percent > 800) return;
+  resizeW.value = String(Math.max(1, Math.round(viewer.naturalWidth * percent / 100)));
+  resizeH.value = String(Math.max(1, Math.round(viewer.naturalHeight * percent / 100)));
+}
+
+function syncResizeFromDimension(changed: "width" | "height"): void {
+  if (!resizeLock.checked || viewer.naturalWidth < 1) return;
+  const value = Number(changed === "width" ? resizeW.value : resizeH.value);
+  if (!Number.isFinite(value) || value < 1) return;
+  const ratio = viewer.naturalWidth / viewer.naturalHeight;
+  if (changed === "width") resizeH.value = String(Math.max(1, Math.round(value / ratio)));
+  else resizeW.value = String(Math.max(1, Math.round(value * ratio)));
+  resizePercent.value = String(Math.round(value / (changed === "width" ? viewer.naturalWidth : viewer.naturalHeight) * 100));
+}
+
+async function writeResized(outputPath: string): Promise<void> {
+  if (!meta) return;
+  const resize = resizeSpec();
+  if (!resize) return;
+  try {
+    const written = await transformImage(meta.path, outputPath, { resize, quality: quality() });
+    resizeBar.hidden = true;
+    await openPath(written);
+    showToast(`分辨率已保存：${baseName(written)}`);
+  } catch (err) {
+    showToast(`分辨率调整失败：${String(err)}`);
+  }
+}
+
+async function saveResizedAs(): Promise<void> {
+  if (!meta) return;
+  const out = await pickSavePathFor(defaultOutputPath(meta, "_缩放"), ENCODABLE);
+  if (out && !warnIfOutputIsSource(out)) await writeResized(out);
+}
+
+async function overwriteResized(): Promise<void> {
+  if (!meta) return;
+  if (!(await confirmAction(`将按 ${resizeW.value} × ${resizeH.value} px 调整并覆盖原图：\n${meta.path}\n\n此操作不可撤销。`, "覆盖原图"))) return;
+  await writeResized(meta.path);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1950,6 +2037,16 @@ slideshowInterval.addEventListener("change", () => {
 
 btnSaveAs.addEventListener("click", () => void saveAs());
 btnSaveTransform.addEventListener("click", () => void saveTransformResult());
+btnResizeImage.addEventListener("click", openResizePanel);
+btnResizeSave.addEventListener("click", () => void saveResizedAs());
+btnResizeOverwrite.addEventListener("click", () => void overwriteResized());
+btnResizeClose.addEventListener("click", () => { resizeBar.hidden = true; });
+resizePercent.addEventListener("input", syncResizeFromPercent);
+resizeW.addEventListener("input", () => syncResizeFromDimension("width"));
+resizeH.addEventListener("input", () => syncResizeFromDimension("height"));
+resizeLock.addEventListener("change", () => {
+  if (resizeLock.checked) syncResizeFromDimension("width");
+});
 btnCrop.addEventListener("click", () => setCropMode(!cropActive));
 btnCropApply.addEventListener("click", () => void applyCrop());
 btnCropClear.addEventListener("click", () => setCropRect(null));

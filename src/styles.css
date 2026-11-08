@@ -349,6 +349,20 @@ body {
   user-select: none;
 }
 
+.resize-bar .field select {
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.resize-bar .field input { width: 82px; }
+.resize-bar .resize-lock { display: inline-flex; align-items: center; gap: 5px; color: var(--text); }
+.resize-bar .resize-lock input { accent-color: var(--accent); }
+
 .bar-label {
   color: var(--text-dim);
   font-weight: 600;
