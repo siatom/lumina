@@ -63,6 +63,11 @@
         <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
         <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
       </symbol>
+      <symbol id="i-text" viewBox="0 0 24 24">
+        <path d="M4 6V4h16v2" />
+        <path d="M12 4v16" />
+        <path d="M8 20h8" />
+      </symbol>
       <symbol id="i-rotate-ccw" viewBox="0 0 24 24">
         <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
         <path d="M3 3v5h5" />
@@ -206,8 +211,6 @@
           </button>
         </div>
 
-        <span class="divider"></span>
-
         <div class="tool-group">
           <button id="btn-prev" title="上一张 (↑ / ← / PageUp)" aria-label="上一张" disabled>
             <svg class="icon"><use href="#i-chevron-left" /></svg>
@@ -279,6 +282,15 @@
             disabled
           >
             <svg class="icon"><use href="#i-crop" /></svg>
+          </button>
+        </div>
+
+        <span class="divider"></span>
+
+        <div class="tool-group">
+          <button id="btn-ocr" class="text-btn" title="识别图片文字 (O)" aria-label="识别图片文字" disabled>
+            <svg class="icon"><use href="#i-text" /></svg>
+            <span>文字识别</span>
           </button>
         </div>
 
@@ -439,6 +451,31 @@
             <img id="viewer-ghost" alt="" aria-hidden="true" draggable="false" />
           </div>
           <div class="crop-overlay" id="crop-overlay" hidden></div>
+          <div class="ocr-box-layer" id="ocr-box-layer" aria-label="识别到的文字区域"></div>
+          <div class="ocr-selection" id="ocr-selection" hidden></div>
+          <aside class="ocr-panel" id="ocr-panel" aria-label="文字识别结果" hidden>
+            <div class="ocr-panel-head">
+              <div>
+                <h2>文字识别</h2>
+                <p>图片在本机识别，模型首次使用时下载并缓存</p>
+              </div>
+              <button id="btn-ocr-close" class="icon-button" aria-label="关闭文字识别">×</button>
+            </div>
+            <label class="ocr-language">识别语言
+              <select id="ocr-language" aria-label="识别语言">
+                <option value="chi_sim+eng" selected>简体中文 + English</option>
+                <option value="eng">English</option>
+                <option value="chi_sim">简体中文</option>
+              </select>
+            </label>
+            <div class="ocr-actions">
+              <button id="btn-ocr-region">框选区域</button>
+              <button id="btn-ocr-copy-all" class="primary" disabled>复制全部</button>
+              <button id="btn-ocr-copy-selected" disabled>复制选中</button>
+            </div>
+            <p id="ocr-status" class="ocr-status" role="status">点击“识别图片文字”开始</p>
+            <div id="ocr-text" class="ocr-text" aria-label="识别文本"></div>
+          </aside>
           <div class="empty-hint" id="empty-hint">
             <svg
               class="empty-mark"

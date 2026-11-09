@@ -56,6 +56,7 @@ import {
   type ImageMetadata,
   type ResizeSpec,
 } from "./api";
+import { recognizeImage, type OcrWord } from "./ocr";
 
 // The per-format file icons, shown in the association panel. These are the same
 // SVG files `cargo run --bin gen-file-icons` rasterises into the `.ico`
@@ -114,6 +115,17 @@ const emptyHint = el<HTMLElement>("empty-hint");
 const emptyMessage = el<HTMLElement>("empty-message");
 const toast = el<HTMLElement>("toast");
 const cropOverlay = el<HTMLElement>("crop-overlay");
+const ocrBoxLayer = el<HTMLElement>("ocr-box-layer");
+const ocrSelection = el<HTMLElement>("ocr-selection");
+const ocrPanel = el<HTMLElement>("ocr-panel");
+const ocrText = el<HTMLElement>("ocr-text");
+const ocrStatus = el<HTMLElement>("ocr-status");
+const ocrLanguage = el<HTMLSelectElement>("ocr-language");
+const btnOcr = el<HTMLButtonElement>("btn-ocr");
+const btnOcrClose = el<HTMLButtonElement>("btn-ocr-close");
+const btnOcrRegion = el<HTMLButtonElement>("btn-ocr-region");
+const btnOcrCopyAll = el<HTMLButtonElement>("btn-ocr-copy-all");
+const btnOcrCopySelected = el<HTMLButtonElement>("btn-ocr-copy-selected");
 const dropHint = el<HTMLElement>("drop-hint");
 
 const thumbs = el<HTMLElement>("thumbs");
@@ -266,6 +278,13 @@ let fileDims: { w: number; h: number } | null = null;
 
 /** Crop mode + the current selection in *source* pixel coordinates. */
 let cropActive = false;
+let ocrWords: OcrWord[] = [];
+let ocrSelected = new Set<number>();
+let ocrDisplayOrigin = { x: 0, y: 0 };
+let ocrResultDims = { w: 0, h: 0 };
+let ocrSelecting = false;
+let ocrSelectStart: { x: number; y: number } | null = null;
+let ocrRunToken = 0;
 
 /** True while the rename modal is open; suppresses file-switch shortcuts. */
 let renaming = false;
@@ -357,6 +376,7 @@ function applyTransform(): void {
     zoomLabel.textContent = label;
     statusZoom.textContent = label;
   }
+  positionOcrWords();
 }
 
 /**
@@ -516,6 +536,201 @@ function showToast(text: string): void {
   }, 2600);
 }
 
+function clearOcrResults(): void {
+  ocrRunToken += 1;
+  ocrWords = [];
+  ocrSelected.clear();
+  ocrDisplayOrigin = { x: 0, y: 0 };
+  ocrResultDims = { w: 0, h: 0 };
+  ocrBoxLayer.replaceChildren();
+  ocrText.replaceChildren();
+  ocrSelection.hidden = true;
+  btnOcrCopyAll.disabled = true;
+  btnOcrCopySelected.disabled = true;
+}
+
+function setOcrPanel(open: boolean): void {
+  ocrPanel.hidden = !open;
+  ocrBoxLayer.hidden = !open;
+  btnOcr.setAttribute("aria-pressed", String(open));
+  if (!open) {
+    ocrRunToken += 1;
+    ocrSelecting = false;
+    ocrSelectStart = null;
+    stage.classList.remove("ocr-selecting");
+    ocrSelection.hidden = true;
+  }
+}
+
+function displayPoint(x: number, y: number, width = meta?.width ?? 0, height = meta?.height ?? 0): { x: number; y: number } {
+  const cx = width / 2;
+  const cy = height / 2;
+  const rad = (rotation * Math.PI) / 180;
+  const px = (x - cx) * (flipH ? -1 : 1);
+  const py = (y - cy) * (flipV ? -1 : 1);
+  return {
+    x: cx + px * Math.cos(rad) - py * Math.sin(rad),
+    y: cy + px * Math.sin(rad) + py * Math.cos(rad),
+  };
+}
+
+function sourceRectToDisplay(rect: CropRect): CropRect {
+  const corners = [
+    displayPoint(rect.x, rect.y),
+    displayPoint(rect.x + rect.width, rect.y),
+    displayPoint(rect.x, rect.y + rect.height),
+    displayPoint(rect.x + rect.width, rect.y + rect.height),
+  ];
+  const xs = corners.map((point) => point.x);
+  const ys = corners.map((point) => point.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+function renderOcrWords(): void {
+  ocrBoxLayer.replaceChildren();
+  ocrText.replaceChildren();
+  if (!meta || !ocrWords.length) return;
+  ocrWords.forEach((word, index) => {
+    const box = document.createElement("button");
+    box.type = "button";
+    box.className = "ocr-box";
+    box.title = `${word.text} (${Math.round(word.confidence)}%)`;
+    box.setAttribute("aria-label", `选择文字：${word.text}`);
+    box.setAttribute("aria-pressed", String(ocrSelected.has(index)));
+    box.addEventListener("pointerdown", (event) => event.stopPropagation());
+    box.addEventListener("click", () => toggleOcrWord(index));
+    ocrBoxLayer.append(box);
+
+    const text = document.createElement("span");
+    text.className = "ocr-word";
+    text.textContent = `${word.text} `;
+    text.dataset.index = String(index);
+    text.setAttribute("aria-pressed", String(ocrSelected.has(index)));
+    text.addEventListener("click", () => toggleOcrWord(index));
+    ocrText.append(text);
+  });
+  positionOcrWords();
+}
+
+function positionOcrWords(): void {
+  if (!meta || !ocrWords.length) return;
+  const bounds = [
+    imageToStage(0, 0),
+    imageToStage(meta.width, 0),
+    imageToStage(0, meta.height),
+    imageToStage(meta.width, meta.height),
+  ];
+  const left = Math.min(...bounds.map((point) => point.x));
+  const top = Math.min(...bounds.map((point) => point.y));
+  const dims = viewDims(meta);
+  const imageScaleX = dims.w / (ocrResultDims.w || dims.w);
+  const imageScaleY = dims.h / (ocrResultDims.h || dims.h);
+  const regionOrigin = ocrDisplayOrigin;
+  ocrBoxLayer.querySelectorAll<HTMLButtonElement>(".ocr-box").forEach((box, index) => {
+    const word = ocrWords[index];
+    if (!word) return;
+    box.style.left = `${left + (regionOrigin.x + word.x * imageScaleX) * scale}px`;
+    box.style.top = `${top + (regionOrigin.y + word.y * imageScaleY) * scale}px`;
+    box.style.width = `${word.width * imageScaleX * scale}px`;
+    box.style.height = `${word.height * imageScaleY * scale}px`;
+  });
+}
+
+function toggleOcrWord(index: number): void {
+  if (ocrSelected.has(index)) ocrSelected.delete(index);
+  else ocrSelected.add(index);
+  renderOcrWords();
+  btnOcrCopySelected.disabled = ocrWords.length === 0;
+}
+
+async function runOcr(region: CropRect | null = null): Promise<void> {
+  if (!meta || !currentPath || !viewer.complete || !viewer.naturalWidth) return;
+  const token = ++ocrRunToken;
+  setOcrPanel(true);
+  ocrWords = [];
+  ocrSelected.clear();
+  renderOcrWords();
+  btnOcrCopyAll.disabled = true;
+  btnOcrCopySelected.disabled = true;
+  ocrStatus.textContent = region ? "正在识别选定区域…" : "正在准备图片…";
+
+  try {
+    // Snapshot the live <img> so EXIF orientation and the exact currently
+    // displayed animation frame are honored before applying preview transforms.
+    const bitmap = await createImageBitmap(viewer);
+    if (token !== ocrRunToken) { bitmap.close(); return; }
+    const width = bitmap.width;
+    const height = bitmap.height;
+    const rotated = rotation % 180 !== 0;
+    const canvas = document.createElement("canvas");
+    canvas.width = rotated ? height : width;
+    canvas.height = rotated ? width : height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("无法创建 OCR 图像画布");
+    context.translate(canvas.width / 2, canvas.height / 2);
+    context.rotate((rotation * Math.PI) / 180);
+    context.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+    context.drawImage(bitmap, -width / 2, -height / 2);
+    bitmap.close();
+
+    const imageRect = region ? sourceRectToDisplay(region) : { x: 0, y: 0, width: canvas.width, height: canvas.height };
+    const x = Math.max(0, Math.floor(imageRect.x));
+    const y = Math.max(0, Math.floor(imageRect.y));
+    const right = Math.min(canvas.width, Math.ceil(imageRect.x + imageRect.width));
+    const bottom = Math.min(canvas.height, Math.ceil(imageRect.y + imageRect.height));
+    if (right <= x || bottom <= y) throw new Error("选区不在图像范围内");
+    const cropped = document.createElement("canvas");
+    cropped.width = right - x;
+    cropped.height = bottom - y;
+    cropped.getContext("2d")?.drawImage(canvas, x, y, cropped.width, cropped.height, 0, 0, cropped.width, cropped.height);
+    ocrDisplayOrigin = { x, y };
+    ocrResultDims = { w: cropped.width, h: cropped.height };
+
+    const { words } = await recognizeImage(cropped, ocrLanguage.value, ({ status, progress }) => {
+      if (token !== ocrRunToken) return;
+      const percent = progress > 0 ? ` ${Math.round(progress * 100)}%` : "";
+      ocrStatus.textContent = `${status}${percent}`;
+    });
+    if (token !== ocrRunToken) return;
+    ocrWords = words;
+    // Recognition coordinates start at the crop origin; renderOcrWords adds
+    // that display-space origin to keep boxes attached through viewer changes.
+    renderOcrWords();
+    ocrStatus.textContent = words.length ? `识别完成 · ${words.length} 个文字片段` : "没有识别到文字";
+    btnOcrCopyAll.disabled = words.length === 0;
+    btnOcrCopySelected.disabled = words.length === 0;
+  } catch (err) {
+    if (token !== ocrRunToken) return;
+    ocrStatus.textContent = `识别失败：${String(err)}`;
+  }
+}
+
+async function copyOcrText(selectedOnly: boolean): Promise<void> {
+  const highlighted = selectedOnly ? window.getSelection()?.toString().trim() : "";
+  const words = selectedOnly
+    ? ocrWords.filter((_, index) => ocrSelected.has(index))
+    : ocrWords;
+  const text = highlighted || words.map((word) => word.text).join(" ").trim();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(selectedOnly ? "已复制选中文字" : "已复制全部识别文字");
+  } catch (err) {
+    showToast(`复制失败：${String(err)}`);
+  }
+}
+
+function beginOcrRegionSelection(): void {
+  if (!meta) return;
+  setCropMode(false);
+  ocrSelecting = true;
+  ocrSelectStart = null;
+  stage.classList.add("ocr-selecting");
+  ocrStatus.textContent = "在图片上拖拽框选要识别的区域";
+}
+
 function showPlaceholder(text: string): void {
   // Swap the branded empty state for the failure message.
   emptyHint.classList.add("is-message");
@@ -584,6 +799,7 @@ function updateControlsEnabled(): void {
     btnRename,
     btnDelete,
     btnCopyPath,
+    btnOcr,
   ]) {
     button.disabled = !on;
   }
@@ -901,6 +1117,8 @@ function clearGhost(): void {
 
 async function openPath(path: string): Promise<void> {
   const token = ++openToken;
+  clearOcrResults();
+  setOcrPanel(false);
 
   let m: ImageMetadata;
   try {
@@ -1526,6 +1744,7 @@ async function gotoPage(index: number): Promise<void> {
   const i = Math.max(0, Math.min(pageCount - 1, index));
   const token = ++pageToken;
   pageIndex = i;
+  clearOcrResults();
   updatePageControls();
 
   try {
@@ -1566,6 +1785,7 @@ async function showLiveFrame(): Promise<void> {
   if (!meta || !currentPath) return;
   pageToken += 1;
   pageIndex = null;
+  clearOcrResults();
   updatePageControls();
   if (fileDims) meta = { ...meta, width: fileDims.w, height: fileDims.h };
   viewerFellBack = false;
@@ -2069,6 +2289,23 @@ btnCrop.addEventListener("click", () => setCropMode(!cropActive));
 btnCropApply.addEventListener("click", () => void applyCrop());
 btnCropClear.addEventListener("click", () => setCropRect(null));
 btnCropExit.addEventListener("click", () => setCropMode(false));
+btnOcr.addEventListener("click", () => {
+  if (!meta) return;
+  if (!ocrPanel.hidden) {
+    setOcrPanel(false);
+    return;
+  }
+  setOcrPanel(true);
+  void runOcr();
+});
+btnOcrClose.addEventListener("click", () => setOcrPanel(false));
+btnOcrRegion.addEventListener("click", beginOcrRegionSelection);
+btnOcrCopyAll.addEventListener("click", () => void copyOcrText(false));
+btnOcrCopySelected.addEventListener("click", () => void copyOcrText(true));
+ocrPanel.addEventListener("pointerdown", (event) => event.stopPropagation());
+ocrLanguage.addEventListener("change", () => {
+  if (ocrWords.length) ocrStatus.textContent = "语言已更改；重新识别以更新结果";
+});
 
 for (const input of [cropX, cropY, cropW, cropH]) {
   input.addEventListener("input", () => {
@@ -2197,7 +2434,7 @@ stage.addEventListener(
 );
 
 stage.addEventListener("dblclick", () => {
-  if (cropActive) return;
+  if (cropActive || ocrSelecting) return;
   void toggleFullscreen();
 });
 
@@ -2215,6 +2452,15 @@ function stagePoint(event: PointerEvent): { x: number; y: number } {
 stage.addEventListener("pointerdown", (event) => {
   if (!meta || event.button !== 0) return;
   stage.setPointerCapture(event.pointerId);
+  if (ocrSelecting) {
+    ocrSelectStart = stagePoint(event);
+    ocrSelection.style.left = `${ocrSelectStart.x}px`;
+    ocrSelection.style.top = `${ocrSelectStart.y}px`;
+    ocrSelection.style.width = "0px";
+    ocrSelection.style.height = "0px";
+    ocrSelection.hidden = false;
+    return;
+  }
   if (cropActive) {
     selectStart = stagePoint(event);
     setCropRect(null);
@@ -2227,6 +2473,14 @@ stage.addEventListener("pointerdown", (event) => {
 });
 
 stage.addEventListener("pointermove", (event) => {
+  if (ocrSelecting && ocrSelectStart) {
+    const point = stagePoint(event);
+    ocrSelection.style.left = `${Math.min(ocrSelectStart.x, point.x)}px`;
+    ocrSelection.style.top = `${Math.min(ocrSelectStart.y, point.y)}px`;
+    ocrSelection.style.width = `${Math.abs(point.x - ocrSelectStart.x)}px`;
+    ocrSelection.style.height = `${Math.abs(point.y - ocrSelectStart.y)}px`;
+    return;
+  }
   if (selectStart) {
     // Ignore degenerate rects so the box does not flicker mid-drag.
     const rect = cropRectFromStage(selectStart, stagePoint(event));
@@ -2244,6 +2498,16 @@ stage.addEventListener("pointermove", (event) => {
 function endDrag(event: PointerEvent): void {
   if (stage.hasPointerCapture(event.pointerId)) {
     stage.releasePointerCapture(event.pointerId);
+  }
+  if (ocrSelecting && ocrSelectStart) {
+    const region = cropRectFromStage(ocrSelectStart, stagePoint(event));
+    ocrSelectStart = null;
+    ocrSelecting = false;
+    stage.classList.remove("ocr-selecting");
+    ocrSelection.hidden = true;
+    if (region) void runOcr(region);
+    else ocrStatus.textContent = "选区太小，请重新框选";
+    return;
   }
   if (selectStart) {
     selectStart = null;
@@ -2407,6 +2671,10 @@ window.addEventListener("keydown", (event) => {
     case "V":
       toggleFlipV();
       break;
+    case "o":
+    case "O":
+      if (meta) btnOcr.click();
+      break;
 
     case "t":
     case "T":
@@ -2448,6 +2716,13 @@ window.addEventListener("keydown", (event) => {
     case "Escape":
       if (menuOpen) setMenuOpen(false);
       else if (document.fullscreenElement) void document.exitFullscreen();
+      else if (ocrSelecting) {
+        ocrSelecting = false;
+        ocrSelectStart = null;
+        stage.classList.remove("ocr-selecting");
+        ocrSelection.hidden = true;
+      }
+      else if (!ocrPanel.hidden) setOcrPanel(false);
       else if (cropActive) setCropMode(false);
       else if (slideshowTimer !== null) void stopSlideshow();
       break;
