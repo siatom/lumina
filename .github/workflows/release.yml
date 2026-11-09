@@ -58,5 +58,5 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           projectPath: .
-          releaseAssetNamePattern: "[name]-${{ matrix.platform.assetOs }}-[arch]-[version][ext]"
+          releaseAssetNamePattern: "[name]-${{ matrix.platform.assetOs }}-[arch]-[version][setup][ext]"
           args: --target ${{ matrix.platform.rust-target }}
