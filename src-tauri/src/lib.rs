@@ -30,6 +30,15 @@ pub fn run() {
             protocol::handle(ctx, request, responder)
         })
         .manage(watcher::WatcherState::default())
+        .setup(|app| {
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_image_metadata,
             commands::list_images,

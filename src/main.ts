@@ -56,6 +56,9 @@ import {
   type ImageMetadata,
   type ResizeSpec,
 } from "./api";
+import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { recognizeImage, type OcrWord } from "./ocr";
 
 // The per-format file icons, shown in the association panel. These are the same
@@ -168,6 +171,11 @@ const assocModal = el<HTMLElement>("assoc-modal");
 const assocNote = el<HTMLElement>("assoc-note");
 const assocList = el<HTMLElement>("assoc-list");
 const assocError = el<HTMLElement>("assoc-error");
+const updateVersion = el<HTMLElement>("update-version");
+const updaterStatus = el<HTMLElement>("update-status");
+const updateProgress = el<HTMLElement>("update-progress");
+const updateProgressFill = el<HTMLElement>("update-progress-fill");
+const updateProgressLabel = el<HTMLElement>("update-progress-label");
 
 const btnOpen = el<HTMLButtonElement>("btn-open");
 const btnOpenFolder = el<HTMLButtonElement>("btn-open-folder");
@@ -216,6 +224,8 @@ const btnAssocNone = el<HTMLButtonElement>("btn-assoc-none");
 const btnAssocSystem = el<HTMLButtonElement>("btn-assoc-system");
 const btnAssocClose = el<HTMLButtonElement>("btn-assoc-close");
 const btnAssocApply = el<HTMLButtonElement>("btn-assoc-apply");
+const btnUpdateCheck = el<HTMLButtonElement>("btn-update-check");
+const btnUpdateInstall = el<HTMLButtonElement>("btn-update-install");
 
 /* -------------------------------------------------------------------------- */
 /* State                                                                       */
@@ -291,6 +301,8 @@ let renaming = false;
 
 /** True while the settings modal is open; also suppresses shortcuts. */
 let assocOpen = false;
+let availableUpdate: Update | null = null;
+let currentAppVersion = "";
 /** Last association report from the backend; the baseline the checkboxes diff against. */
 let assocStatus: AssocStatus | null = null;
 
@@ -1912,6 +1924,10 @@ async function openAssocPanel(): Promise<void> {
   assocError.hidden = true;
   assocModal.hidden = false;
   btnSettings.setAttribute("aria-expanded", "true");
+  void getVersion().then((version) => {
+    currentAppVersion = version;
+    updateVersion.textContent = `当前版本 ${version}`;
+  });
   try {
     assocStatus = await getAssociationStatus();
   } catch (err) {
@@ -2337,6 +2353,71 @@ btnCopyPath.addEventListener("click", () => void copyCurrentPath());
 
 /* --------------------------- settings / association ---------------------- */
 
+async function checkForUpdate(): Promise<void> {
+  btnUpdateCheck.disabled = true;
+  btnUpdateInstall.hidden = true;
+  updateProgress.hidden = true;
+  updaterStatus.textContent = "正在连接 GitHub 检查更新…";
+  try {
+    currentAppVersion = await getVersion();
+    updateVersion.textContent = `当前版本 ${currentAppVersion}`;
+    availableUpdate = await check();
+    if (!availableUpdate) {
+      updaterStatus.textContent = `已是最新版本（${currentAppVersion}）`;
+      return;
+    }
+    updaterStatus.textContent = `发现新版本 ${availableUpdate.version}`;
+    btnUpdateInstall.hidden = false;
+  } catch (err) {
+    availableUpdate = null;
+    updaterStatus.textContent = `检查更新失败：${String(err)}`;
+  } finally {
+    btnUpdateCheck.disabled = false;
+  }
+}
+
+async function downloadAndInstallUpdate(): Promise<void> {
+  if (!availableUpdate) return;
+  btnUpdateCheck.disabled = true;
+  btnUpdateInstall.disabled = true;
+  btnUpdateInstall.hidden = true;
+  updateProgress.hidden = false;
+  updateProgressFill.style.width = "0%";
+  updateProgressLabel.textContent = "准备下载…";
+  updaterStatus.textContent = `正在下载 Lumina ${availableUpdate.version}`;
+
+  let downloaded = 0;
+  let total: number | null = null;
+  try {
+    await availableUpdate.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? null;
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        const receivedMb = (downloaded / 1024 / 1024).toFixed(1);
+        if (total && total > 0) {
+          const percent = Math.min(100, Math.floor((downloaded / total) * 100));
+          updateProgressFill.style.width = `${percent}%`;
+          updateProgressLabel.textContent = `${percent}% · ${receivedMb} / ${(total / 1024 / 1024).toFixed(1)} MB`;
+        } else {
+          updateProgressLabel.textContent = `${receivedMb} MB`;
+        }
+      } else if (event.event === "Finished") {
+        updateProgressFill.style.width = "100%";
+        updateProgressLabel.textContent = "下载完成，正在安装…";
+      }
+    });
+    updaterStatus.textContent = "更新已安装，正在重新启动…";
+    await relaunch();
+  } catch (err) {
+    updateProgress.hidden = true;
+    updaterStatus.textContent = `更新安装失败：${String(err)}`;
+    btnUpdateInstall.hidden = false;
+    btnUpdateInstall.disabled = false;
+    btnUpdateCheck.disabled = false;
+  }
+}
+
 btnSettings.addEventListener("click", () => void openAssocPanel());
 btnAssocClose.addEventListener("click", closeAssocPanel);
 btnAssocAll.addEventListener("click", () => setAllAssocChecks(true));
@@ -2348,6 +2429,8 @@ btnAssocSystem.addEventListener("click", () => {
 assocModal.addEventListener("pointerdown", (event) => {
   if (event.target === assocModal) closeAssocPanel();
 });
+btnUpdateCheck.addEventListener("click", () => void checkForUpdate());
+btnUpdateInstall.addEventListener("click", () => void downloadAndInstallUpdate());
 
 /* ------------------------------- pages ---------------------------------- */
 
@@ -2567,6 +2650,8 @@ window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
       closeAssocPanel();
+    } else if ((event.target as HTMLElement | null)?.closest(".update-section")) {
+      return;
     } else if (event.key === "Enter" && !isEditable(event.target)) {
       event.preventDefault();
       void applyAssocChanges();

@@ -553,6 +553,21 @@
         </p>
         <p class="assoc-note" id="assoc-note"></p>
         <ul class="assoc-list" id="assoc-list"></ul>
+        <section class="update-section" aria-labelledby="update-title">
+          <div class="update-heading">
+            <div>
+              <h3 id="update-title">软件更新</h3>
+              <p id="update-version" class="update-version"></p>
+            </div>
+            <button id="btn-update-check">检查更新</button>
+          </div>
+          <p id="update-status" class="update-status" role="status" aria-live="polite"></p>
+          <div class="update-progress" id="update-progress" hidden>
+            <div class="update-progress-track"><div id="update-progress-fill"></div></div>
+            <span id="update-progress-label"></span>
+          </div>
+          <button id="btn-update-install" class="primary" hidden>下载并安装</button>
+        </section>
         <p class="modal-error" id="assoc-error" hidden></p>
         <div class="modal-actions">
           <button id="btn-assoc-all">全选</button>

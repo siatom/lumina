@@ -29,6 +29,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -40,5 +41,17 @@
     "resources": [
       "icons/file-icons/*"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI5NkExNDgxNEU5QTg3OTgKUldTWWg1cE9nUlJxdVk3cCtvTUl4OTZEWjlkVktRZGV1Z2N6eTVqZm56Uks1NnZxbjB5S0lyeTYK",
+      "endpoints": [
+        "https://github.com/siatom/lumina/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "requireSignedVersion": true
+    }
   }
 }

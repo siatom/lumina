@@ -71,6 +71,7 @@
 - **幻灯片**播放（可选间隔）、**全屏**浏览、**深色 / 浅色**主题（默认跟随系统外观）。
 - **拖放**图片或文件夹即可打开。
 - 完整键盘快捷键，贴合 ImageGlass 的操作直觉。
+- **GitHub Release 更新**：在设置面板检查新版本，查看下载进度并签名校验后安装；Windows 安装后自动重启。
 
 ### 接得上系统：文件关联与专属图标
 
@@ -129,6 +130,15 @@ pnpm build                                  # 前端类型检查 + 构建
 cd src-tauri && cargo check                 # Rust 编译检查
 cd src-tauri && cargo test                  # 图像管线单元 / 集成测试
 ```
+
+### GitHub Release 更新配置
+
+Release 工作流在推送 `v*` 标签时为 Windows、macOS 和 Linux 构建安装包、签名更新包，并生成 `latest.json`。首次启用时需要在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 添加：
+
+- `TAURI_SIGNING_PRIVATE_KEY`：本机 `%USERPROFILE%\.tauri\lumina.key` 文件的完整内容（私钥不要提交到仓库）。
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：密钥密码；当前生成的密钥未设置密码，可留空。
+
+当前 GitHub Release 没有更新附件；自动更新会从下一次带 `v` 前缀的 Release 开始生效。更新签名密钥必须长期妥善保管，丢失后无法为已发布版本签发可接受的更新。
 
 ---
 

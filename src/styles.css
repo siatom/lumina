@@ -1101,6 +1101,88 @@ body.is-fullscreen .statusbar {
 /* Wider than the rename dialog: eight format rows plus a two-button footer. */
 .modal-card.modal-wide {
   width: min(520px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.update-section {
+  margin-top: 14px;
+  padding: 12px 0 2px;
+  border-top: 1px solid var(--border);
+}
+
+.update-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-heading h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.update-version,
+.update-status {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.update-heading button,
+#btn-update-install {
+  flex: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elev-2);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.update-heading button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.update-heading button:disabled,
+#btn-update-install:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+#btn-update-install {
+  margin-top: 8px;
+}
+
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.update-progress-track {
+  height: 5px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+}
+
+.update-progress-track > div {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.16s ease;
 }
 
 /* Platform caveat. The left rule reads as an annotation rather than an error,
