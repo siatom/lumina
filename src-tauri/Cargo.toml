@@ -53,6 +53,7 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
     "ico",
 ] }
+jpeg-decoder = { version = "0.3", default-features = false }
 
 # Vector graphics (SVG) rasterisation for metadata / thumbnails / conversion.
 # Pure Rust (usvg + tiny-skia), no native toolchain required.

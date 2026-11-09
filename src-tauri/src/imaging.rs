@@ -7,7 +7,8 @@
 use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::collections::VecDeque;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::webp::WebPEncoder;
@@ -49,6 +50,10 @@ pub const WEBVIEW_NATIVE_EXTENSIONS: &[&str] =
 /// Longest-edge cap when rasterising an SVG for metadata / thumbnails, so a
 /// pathological `width="100000"` document cannot allocate gigabytes.
 const SVG_MAX_DECODE_EDGE: u32 = 4096;
+
+/// Full-resolution thumbnail decodes are serialized across formats that do
+/// not support decode-time scaling.
+static THUMB_DECODE_SLOT: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Default JPEG quality when the caller does not supply one.
 pub const DEFAULT_JPEG_QUALITY: u8 = 85;
@@ -677,10 +682,74 @@ pub fn make_thumbnail(path: &Path, max_size: u32) -> Result<Vec<u8>, AppError> {
         let thumb = img.thumbnail(max_size, max_size);
         return encode_png(&thumb);
     }
-    let img = decode(path)?; // raw: orientation is applied after downscaling
+    let img = if matches!(extension_of(path).as_str(), "jpg" | "jpeg") {
+        decode_jpeg_thumbnail(path, max_size)?
+    } else {
+        // Formats without decode-time scaling share one full-resolution decode
+        // slot, preventing the frontend's thumbnail pool from multiplying the
+        // peak bitmap memory by its request concurrency.
+        let _slot = THUMB_DECODE_SLOT
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        decode(path)?
+    };
     let mut thumb = img.thumbnail(max_size, max_size);
     apply_exif_orientation(&mut thumb, path);
     encode_png(&thumb)
+}
+
+/// Decode JPEG thumbnails at the nearest supported DCT scale before allocating
+/// pixel buffers. The regular image decoder does not currently expose this
+/// option, so this path is limited to thumbnail generation.
+fn decode_jpeg_thumbnail(path: &Path, max_size: u32) -> Result<DynamicImage, AppError> {
+    let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(fs::File::open(path)?));
+    decoder
+        .read_info()
+        .map_err(|error| AppError::Other(format!("JPEG decode error: {error}")))?;
+    let target = max_size.clamp(1, u16::MAX as u32) as u16;
+    decoder
+        .scale(target, target)
+        .map_err(|error| AppError::Other(format!("JPEG scale error: {error}")))?;
+    let pixels = decoder
+        .decode()
+        .map_err(|error| AppError::Other(format!("JPEG decode error: {error}")))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| AppError::Other("JPEG dimensions unavailable".into()))?;
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::L16 => {
+            let samples: Vec<u16> = pixels
+                .chunks_exact(2)
+                .map(|sample| u16::from_ne_bytes([sample[0], sample[1]]))
+                .collect();
+            image::ImageBuffer::<image::Luma<u16>, _>::from_raw(
+                u32::from(info.width),
+                u32::from(info.height),
+                samples,
+            )
+                .map(DynamicImage::ImageLuma16)
+                .ok_or_else(|| AppError::Other("JPEG pixel buffer size mismatch".into()))
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            image::GrayImage::from_raw(u32::from(info.width), u32::from(info.height), pixels)
+                .map(DynamicImage::ImageLuma8)
+                .ok_or_else(|| AppError::Other("JPEG pixel buffer size mismatch".into()))
+        }
+        jpeg_decoder::PixelFormat::RGB24 => {
+            image::RgbImage::from_raw(u32::from(info.width), u32::from(info.height), pixels)
+                .map(DynamicImage::ImageRgb8)
+                .ok_or_else(|| AppError::Other("JPEG pixel buffer size mismatch".into()))
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            // Preserve uncommon CMYK JPEG support through the standard decoder.
+            let _slot = THUMB_DECODE_SLOT
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            decode(path)
+        }
+    }
 }
 
 /// Bytes to hand to an `<img>` element for the *original* view.
@@ -835,16 +904,199 @@ pub fn transform_image(
 // Multi-page / animation support
 // ---------------------------------------------------------------------------
 
-fn gif_frames(path: &Path) -> Result<Vec<image::Frame>, AppError> {
+fn gif_decoder(
+    path: &Path,
+) -> Result<image::codecs::gif::GifDecoder<BufReader<fs::File>>, AppError> {
     let decoder =
         image::codecs::gif::GifDecoder::new(BufReader::new(fs::File::open(path)?))?;
-    Ok(decoder.into_frames().collect_frames()?)
+    Ok(decoder)
 }
 
-fn webp_frames(path: &Path) -> Result<Vec<image::Frame>, AppError> {
+fn webp_decoder(
+    path: &Path,
+) -> Result<image::codecs::webp::WebPDecoder<BufReader<fs::File>>, AppError> {
     let decoder =
         image::codecs::webp::WebPDecoder::new(BufReader::new(fs::File::open(path)?))?;
-    Ok(decoder.into_frames().collect_frames()?)
+    Ok(decoder)
+}
+
+fn animation_frame_count(
+    frames: impl Iterator<Item = image::ImageResult<image::Frame>>,
+) -> Result<u32, AppError> {
+    let mut count = 0u32;
+    for frame in frames {
+        frame?;
+        count = count.saturating_add(1);
+    }
+    Ok(count)
+}
+
+const ANIMATION_CACHE_LIMIT: usize = 64 * 1024 * 1024;
+const ANIMATION_CACHE_FRAMES: usize = 3;
+const ANIMATION_COUNT_CACHE_ENTRIES: usize = 16;
+
+struct AnimationSession {
+    path: PathBuf,
+    modified_ms: u64,
+    file_size: u64,
+    next_index: u32,
+    frames: mpsc::Receiver<Result<image::Frame, String>>,
+    cache: VecDeque<(u32, Arc<image::RgbaImage>)>,
+    cache_bytes: usize,
+}
+
+static ANIMATION_SESSION: OnceLock<Mutex<Option<AnimationSession>>> = OnceLock::new();
+static ANIMATION_COUNTS: OnceLock<Mutex<VecDeque<(PathBuf, u64, u64, u32)>>> = OnceLock::new();
+
+fn cached_animation_frame_count(path: &Path, ext: &str) -> Result<u32, AppError> {
+    let metadata = fs::metadata(path)?;
+    let modified_ms = modified_ms_of(&metadata);
+    let file_size = metadata.len();
+    let cache = ANIMATION_COUNTS.get_or_init(|| Mutex::new(VecDeque::new()));
+    {
+        let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(position) = cache.iter().position(|(cached_path, modified, size, _)| {
+            cached_path == path && *modified == modified_ms && *size == file_size
+        }) {
+            let entry = cache.remove(position).expect("cache position exists");
+            let count = entry.3;
+            cache.push_back(entry);
+            return Ok(count);
+        }
+    }
+
+    let count = match ext {
+        "gif" => animation_frame_count(gif_decoder(path)?.into_frames())?,
+        "webp" => animation_frame_count(webp_decoder(path)?.into_frames())?,
+        _ => 1,
+    };
+    let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.push_back((path.to_path_buf(), modified_ms, file_size, count));
+    while cache.len() > ANIMATION_COUNT_CACHE_ENTRIES {
+        cache.pop_front();
+    }
+    Ok(count)
+}
+
+fn stream_animation_frames(
+    frames: impl Iterator<Item = image::ImageResult<image::Frame>>,
+    sender: mpsc::SyncSender<Result<image::Frame, String>>,
+) {
+    for frame in frames {
+        match frame {
+            Ok(frame) => {
+                if sender.send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(Err(error.to_string()));
+                return;
+            }
+        }
+    }
+}
+
+fn start_animation_session(path: &Path, ext: &str) -> AnimationSession {
+    let (sender, frames) = mpsc::sync_channel(1);
+    let owned_path = path.to_path_buf();
+    let owned_ext = ext.to_owned();
+    std::thread::spawn(move || {
+        let result: Result<(), AppError> = match owned_ext.as_str() {
+            "gif" => match gif_decoder(&owned_path) {
+                Ok(decoder) => {
+                    stream_animation_frames(decoder.into_frames(), sender.clone());
+                    return;
+                }
+                Err(error) => Err(error),
+            },
+            "webp" => match webp_decoder(&owned_path) {
+                Ok(decoder) => {
+                    stream_animation_frames(decoder.into_frames(), sender.clone());
+                    return;
+                }
+                Err(error) => Err(error),
+            },
+            _ => Err(AppError::Unsupported(format!("animation format: {owned_ext}"))),
+        };
+        if let Err(error) = result {
+            let _ = sender.send(Err(error.to_string()));
+        }
+    });
+    let metadata = fs::metadata(path).ok();
+    AnimationSession {
+        path: path.to_path_buf(),
+        modified_ms: metadata.as_ref().map(modified_ms_of).unwrap_or(0),
+        file_size: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+        next_index: 0,
+        frames,
+        cache: VecDeque::new(),
+        cache_bytes: 0,
+    }
+}
+
+fn cache_animation_frame(
+    session: &mut AnimationSession,
+    index: u32,
+    frame: Arc<image::RgbaImage>,
+) {
+    let bytes = frame.as_raw().len();
+    if bytes > ANIMATION_CACHE_LIMIT {
+        return;
+    }
+    session.cache.push_back((index, frame));
+    session.cache_bytes += bytes;
+    while session.cache.len() > ANIMATION_CACHE_FRAMES
+        || session.cache_bytes > ANIMATION_CACHE_LIMIT
+    {
+        if let Some((_, removed)) = session.cache.pop_front() {
+            session.cache_bytes = session.cache_bytes.saturating_sub(removed.as_raw().len());
+        }
+    }
+}
+
+fn animation_frame_at(
+    path: &Path,
+    ext: &str,
+    index: u32,
+) -> Result<Arc<image::RgbaImage>, AppError> {
+    let metadata = fs::metadata(path)?;
+    let modified_ms = modified_ms_of(&metadata);
+    let file_size = metadata.len();
+    let slot = ANIMATION_SESSION.get_or_init(|| Mutex::new(None));
+    let mut active = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stale = active.as_ref().map_or(true, |session| {
+        session.path != path || session.modified_ms != modified_ms || session.file_size != file_size
+    });
+    if stale {
+        *active = Some(start_animation_session(path, ext));
+    }
+    let session = active.as_mut().expect("animation session initialized");
+
+    if let Some(position) = session.cache.iter().position(|(cached, _)| *cached == index) {
+        let item = session.cache.remove(position).expect("cache position exists");
+        let frame = Arc::clone(&item.1);
+        session.cache.push_back(item);
+        return Ok(frame);
+    }
+    if index < session.next_index {
+        *session = start_animation_session(path, ext);
+    }
+    let session = active.as_mut().expect("animation session initialized");
+    while session.next_index <= index {
+        let frame = match session.frames.recv() {
+            Ok(Ok(frame)) => Arc::new(frame.into_buffer()),
+            Ok(Err(error)) => return Err(AppError::Other(error)),
+            Err(_) => return Err(AppError::Other(format!("frame index {index} out of range"))),
+        };
+        let current = session.next_index;
+        session.next_index = session.next_index.saturating_add(1);
+        cache_animation_frame(session, current, Arc::clone(&frame));
+        if current == index {
+            return Ok(frame);
+        }
+    }
+    Err(AppError::Other(format!("frame index {index} out of range")))
 }
 
 fn tiff_error(e: tiff::TiffError) -> AppError {
@@ -944,12 +1196,12 @@ fn tiff_to_dynamic(
 
 /// Number of pages / frames in a file. Single-image formats return 1.
 ///
-/// GIF and animated WebP report their frame count (all frames are decoded);
-/// multi-page TIFF reports its directory count.
+/// GIF and animated WebP are traversed one frame at a time without retaining
+/// decoded buffers; multi-page TIFF reports its directory count.
 pub fn page_count(path: &Path) -> Result<u32, AppError> {
     match extension_of(path).as_str() {
-        "gif" => Ok(gif_frames(path)?.len() as u32),
-        "webp" => Ok(webp_frames(path)?.len() as u32),
+        "gif" => cached_animation_frame_count(path, "gif"),
+        "webp" => cached_animation_frame_count(path, "webp"),
         "tif" | "tiff" => tiff_page_count(path),
         _ => Ok(1),
     }
@@ -963,24 +1215,10 @@ pub fn read_frame_png(path: &Path, index: u32) -> Result<Vec<u8>, AppError> {
     let ext = extension_of(path);
     let mut img = match ext.as_str() {
         "gif" => {
-            let frames = gif_frames(path)?;
-            let f = frames.get(index as usize).ok_or_else(|| {
-                AppError::Other(format!(
-                    "frame index {index} out of range ({} frames)",
-                    frames.len()
-                ))
-            })?;
-            DynamicImage::ImageRgba8(f.buffer().clone())
+            DynamicImage::ImageRgba8((*animation_frame_at(path, "gif", index)?).clone())
         }
         "webp" => {
-            let frames = webp_frames(path)?;
-            let f = frames.get(index as usize).ok_or_else(|| {
-                AppError::Other(format!(
-                    "frame index {index} out of range ({} frames)",
-                    frames.len()
-                ))
-            })?;
-            DynamicImage::ImageRgba8(f.buffer().clone())
+            DynamicImage::ImageRgba8((*animation_frame_at(path, "webp", index)?).clone())
         }
         // `tiff_frame` already applies the per-page orientation tag.
         "tif" | "tiff" => tiff_frame(path, index)?,
