@@ -1,6 +1,6 @@
 [package]
 name = "lumina"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lumina - a lightweight cross-platform image viewer"
 authors = ["DevTeam"]
 edition = "2024"
