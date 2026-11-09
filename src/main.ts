@@ -939,6 +939,7 @@ const thumbObserver = new IntersectionObserver(
 function pumpThumbs(): void {
   while (thumbsInFlight < THUMB_CONCURRENCY && thumbQueue.length > 0) {
     const img = thumbQueue.shift() as HTMLImageElement;
+    if (!img.isConnected || img.dataset.loaded === "true") continue;
     thumbsInFlight++;
     void loadThumbnail(img).finally(() => {
       thumbsInFlight--;
@@ -963,66 +964,105 @@ function setImgSrc(img: HTMLImageElement, url: string): Promise<void> {
  */
 async function loadThumbnail(img: HTMLImageElement): Promise<void> {
   const path = img.dataset.path;
-  if (!path) return;
+  const version = img.dataset.version;
+  if (!path || !version || !img.isConnected) return;
 
   try {
     const url = await luminaImageUrl(path, {
       mode: "thumb",
       max: 192,
-      version: img.dataset.version,
+      version,
     });
+    if (!img.isConnected || img.dataset.version !== version) return;
     await setImgSrc(img, url);
-    if (img.naturalWidth > 0) return;
+    if (!img.isConnected || img.dataset.version !== version) return;
+    if (img.naturalWidth > 0) {
+      img.dataset.loaded = "true";
+      return;
+    }
   } catch {
     /* fall through to the IPC fallback */
   }
 
   try {
     const blob = await getThumbnail(path, 192);
+    if (!img.isConnected || img.dataset.version !== version) return;
     const url = URL.createObjectURL(blob);
     try {
       await setImgSrc(img, url);
+      if (!img.isConnected || img.dataset.version !== version) return;
       if (img.naturalWidth === 0) throw new Error("thumbnail decode failed");
+      img.dataset.loaded = "true";
     } finally {
       URL.revokeObjectURL(url);
     }
   } catch {
-    img.closest(".thumb")?.classList.add("thumb-failed");
+    if (img.isConnected && img.dataset.version === version) {
+      img.closest(".thumb")?.classList.add("thumb-failed");
+    }
   }
 }
 
 function renderThumbs(list: DirectoryListing, active: string): void {
-  thumbsTrack.replaceChildren();
   thumbsCount.textContent = `${list.entries.length} 张`;
+  const existing = new Map<string, HTMLButtonElement>();
+  for (const button of thumbsTrack.querySelectorAll<HTMLButtonElement>(".thumb")) {
+    const path = button.querySelector<HTMLImageElement>("img")?.dataset.path;
+    if (path) existing.set(path, button);
+  }
 
-  const frag = document.createDocumentFragment();
+  const retained = new Set<string>();
   list.entries.forEach((entry, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "thumb";
+    let button = existing.get(entry.path);
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "thumb";
+
+      const img = document.createElement("img");
+      img.dataset.path = entry.path;
+      img.dataset.version = versionOf(entry);
+      img.alt = entry.file_name;
+      img.draggable = false;
+
+      const name = document.createElement("span");
+      name.className = "thumb-name";
+      button.append(img, name);
+      thumbObserver.observe(img);
+    }
+
+    retained.add(entry.path);
     button.dataset.index = String(index);
     button.title = entry.file_name;
-    if (entry.path === active) button.classList.add("active");
+    button.classList.toggle("active", entry.path === active);
 
-    const img = document.createElement("img");
-    img.dataset.path = entry.path;
-    img.dataset.version = versionOf(entry);
+    const img = button.querySelector<HTMLImageElement>("img") as HTMLImageElement;
+    const version = versionOf(entry);
+    if (img.dataset.version !== version) {
+      thumbObserver.unobserve(img);
+      for (let i = thumbQueue.length - 1; i >= 0; i--) {
+        if (thumbQueue[i] === img) thumbQueue.splice(i, 1);
+      }
+      img.dataset.version = version;
+      delete img.dataset.loaded;
+      img.removeAttribute("src");
+      button.classList.remove("thumb-failed");
+      thumbObserver.observe(img);
+    }
     img.alt = entry.file_name;
-    img.draggable = false;
-
-    const name = document.createElement("span");
-    name.className = "thumb-name";
-    name.textContent = entry.file_name;
-
-    button.append(img, name);
-    frag.appendChild(button);
+    const name = button.querySelector<HTMLElement>(".thumb-name");
+    if (name) name.textContent = entry.file_name;
+    // insertBefore moves reused nodes without discarding their loaded image.
+    const atIndex = thumbsTrack.children.item(index);
+    if (atIndex !== button) thumbsTrack.insertBefore(button, atIndex);
   });
-  thumbsTrack.appendChild(frag);
 
-  for (const img of thumbsTrack.querySelectorAll<HTMLImageElement>("img")) {
-    thumbObserver.observe(img);
+  for (const [path, button] of existing) {
+    if (retained.has(path)) continue;
+    const img = button.querySelector<HTMLImageElement>("img");
+    if (img) thumbObserver.unobserve(img);
+    button.remove();
   }
-  thumbsTrack.querySelector(".thumb.active")?.scrollIntoView({ block: "nearest" });
   thumbsRendered = true;
 }
 
@@ -1334,8 +1374,8 @@ function ensureWatching(dir: string): void {
 /**
  * Re-list the browsed directory and bring the UI back in line with the disk.
  *
- * Nothing is applied incrementally: the listing is replaced wholesale, so a
- * coalesced — or even dropped — event can never leave a stale entry on screen.
+ * Listing changes are reconciled by path and file revision so unchanged
+ * thumbnails keep their DOM nodes, decoded images and scroll position.
  */
 async function refreshListing(): Promise<void> {
   const dir = listing?.dir;
@@ -1359,7 +1399,7 @@ async function refreshListing(): Promise<void> {
   const open = currentPath;
   const entry = open !== null ? fresh.entries.find((e) => e.path === open) : undefined;
   listing = fresh;
-  thumbsRendered = false;
+  if (thumbsRendered) renderThumbs(fresh, entry?.path ?? open ?? "");
 
   // Rewritten in place: re-decode under a fresh version token.
   if (
