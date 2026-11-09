@@ -480,6 +480,171 @@ button.danger:hover:not(:disabled) {
   pointer-events: none;
 }
 
+.stage.ocr-selecting {
+  cursor: crosshair;
+}
+
+.ocr-selection {
+  position: absolute;
+  z-index: 4;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 9999px #0005;
+  pointer-events: none;
+}
+
+.ocr-box-layer {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ocr-box {
+  position: absolute;
+  min-width: 2px;
+  min-height: 4px;
+  padding: 0;
+  border: 1px solid #42b6ff99;
+  border-radius: 2px;
+  background: #42b6ff12;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.ocr-box:hover,
+.ocr-box[aria-pressed="true"] {
+  border-color: #48baff;
+  background: #48baff44;
+}
+
+.ocr-panel {
+  position: absolute;
+  z-index: 5;
+  top: 14px;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(360px, calc(100% - 28px));
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-elev) 96%, transparent);
+  box-shadow: 0 16px 48px #0007;
+  backdrop-filter: blur(18px);
+  cursor: default;
+}
+
+.ocr-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ocr-panel-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.ocr-panel-head p {
+  margin: 5px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+.ocr-panel .icon-button {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 21px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ocr-panel .icon-button:hover,
+.ocr-panel button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ocr-language {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ocr-language select,
+.ocr-actions button {
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.ocr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ocr-actions button {
+  flex: 1 1 auto;
+  cursor: pointer;
+}
+
+.ocr-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ocr-status {
+  min-height: 18px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.ocr-text {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+  line-height: 1.8;
+  user-select: text;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ocr-word {
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.ocr-word:hover,
+.ocr-word[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 .drop-hint {
   position: absolute;
   inset: 0;
