@@ -14,10 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { os: windows-latest, rust-target: x86_64-pc-windows-msvc }
-          - { os: macos-latest, rust-target: aarch64-apple-darwin }
-          - { os: macos-latest, rust-target: x86_64-apple-darwin }
-          - { os: ubuntu-22.04, rust-target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, rust-target: x86_64-pc-windows-msvc, assetOs: Windows }
+          - { os: macos-latest, rust-target: aarch64-apple-darwin, assetOs: macOS }
+          - { os: macos-latest, rust-target: x86_64-apple-darwin, assetOs: macOS }
+          - { os: ubuntu-22.04, rust-target: x86_64-unknown-linux-gnu, assetOs: Linux }
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
@@ -58,5 +58,5 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           projectPath: .
-          releaseAssetNamePattern: "[name]-[platform]-[arch]-[version][ext]"
+          releaseAssetNamePattern: "[name]-${{ matrix.platform.assetOs }}-[arch]-[version][ext]"
           args: --target ${{ matrix.platform.rust-target }}
